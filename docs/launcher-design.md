@@ -128,7 +128,18 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 2 gpu layers | `gpu_layers` | `-ngl` | `auto` \| `all` \| int ≥ 0 | `auto` |
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
 | 4 sampling | `temp`, `top_k`, `top_p`, `min_p` | `--temp`, `--top-k`, `--top-p`, `--min-p` | float ≥ 0, int ≥ 0, float 0–1, float 0–1 | 0.6, 20, 0.95, 0.0 |
-| 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | 0.0, 0.0, **1.0**, 64 |
+| 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | **all unset** |
+
+**The penalties row defaults to unset**, not to llama-server's values (which are
+`0.0 / 0.0 / 1.0 / 64`). Pre-filling them would put numbers on the board that nobody
+chose, and someone unfamiliar with these samplers cannot tell a default from a decision.
+The pairing is not even uniform — `0.0` disables presence and frequency, but `1.0` is what
+disables repeat — so a pre-filled row would actively mislead about what "off" looks like.
+Unset renders as `-`, emits no flag at all, and llama-server applies its own default. A
+number appears only once someone sets one, and `-` sets it back.
+
+This is the general rule for any setting whose catalog default is `None`: we do not pass
+that flag. `draft_model` is the other one.
 | 6 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
 | 7 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
 | 8 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
@@ -303,7 +314,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   2  gpu layers   auto
   3  host:port    127.0.0.1:8080
   4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
-  5  penalties    presence 0.0  frequency 0.0  repeat 1.0  repeat-last-n 64
+  5  penalties    presence 0.0  frequency -  repeat -  repeat-last-n -
   6  toggles      jinja on  no-mmproj on  reasoning auto  effort xhigh  fa on  kv-unified on
   7  kv cache     K f16 / V f16
   8  batching     -np auto  -b 2048  -ub 512

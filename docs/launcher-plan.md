@@ -167,6 +167,20 @@ class TestParseValue(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("xhigh", err)
 
+    def test_a_server_default_setting_can_be_set_and_unset(self):
+        """Settings whose catalog default is None are ones we simply do not pass.
+        They must be resettable, or a value set once could never be cleared."""
+        self.assertEqual(self.parse("repeat_penalty", "1.1"), (True, 1.1))
+        self.assertEqual(self.parse("repeat_penalty", "-"), (True, None))
+        self.assertEqual(self.parse("repeat_last_n", "-"), (True, None))
+        self.assertEqual(self.parse("frequency_penalty", "-"), (True, None))
+
+    def test_dash_is_not_a_magic_value_for_settings_that_have_a_default(self):
+        """temp has a real catalog default, so "-" there is just bad input."""
+        ok, err = self.parse("temp", "-")
+        self.assertFalse(ok)
+        self.assertIn("number", err)
+
     def test_choice_rejects_unknown_and_lists_options(self):
         ok, err = self.parse("cache_type_k", "q3_0")
         self.assertFalse(ok)
@@ -288,14 +302,22 @@ GROUPS = [
     ]),
     # Their own row rather than four more fields on sampling: eight values on one
     # line stops being readable, and these four are one concept.
+    #
+    # All four default to None, meaning "we do not pass this flag; llama-server
+    # uses its own default". That is deliberate. Pre-filling them with the
+    # server's defaults (0.0 / 0.0 / 1.0 / 64) would put numbers on the board
+    # that nobody chose, and a user who does not know these samplers cannot tell
+    # a default apart from a decision. Worse, the pairing is not even uniform -
+    # 0.0 disables presence and frequency, but 1.0 is what disables repeat - so
+    # the pre-filled row would actively mislead. Unset renders as "-" and emits
+    # nothing; a value appears only once someone sets one.
     Group("penalties", "penalties", [
-        Setting("presence_penalty", "--presence-penalty", "presence", "float", 0.0),
-        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", 0.0),
-        # 1.0 disables. Not 0.0 - this one is a multiplier, unlike its neighbours.
-        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", 1.0, lo=0),
+        Setting("presence_penalty", "--presence-penalty", "presence", "float", None),
+        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", None),
+        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", None, lo=0),
         # lo=0 because 0 disables and the binary REJECTS -1, unlike some older
         # llama.cpp builds where -1 meant "the whole context".
-        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", 64, lo=0),
+        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", None, lo=0),
     ]),
     Group("toggles", "toggles", [
         Setting("jinja", "--jinja", "jinja", "bool", True),
@@ -364,6 +386,13 @@ def parse_value(setting, text):
     """Parse user input for one setting. Returns (True, value) or (False, error)."""
     text = (text or "").strip()
     t = setting.type
+
+    # A setting whose catalog default is None means "we do not pass this flag".
+    # "-" puts it back there. Without an explicit way to unset, a value could be
+    # set once and never cleared - the same dead end that stranded draft_model,
+    # where the launcher refused to start and named a row the UI would not offer.
+    if text == "-" and setting.default is None and t not in ("tri", "bool"):
+        return True, None
 
     if t == "tri":
         if text == "":
@@ -479,6 +508,18 @@ class TestEmit(unittest.TestCase):
 
     def test_bool_false_emits_nothing(self):
         self.assertEqual(self.emit("metrics", False), [])
+
+    def test_an_unset_server_default_emits_nothing(self):
+        """The point of leaving these unset: the flag never reaches the command
+        line, so llama-server applies its own default rather than ours."""
+        for key in ("presence_penalty", "frequency_penalty",
+                    "repeat_penalty", "repeat_last_n"):
+            with self.subTest(key=key):
+                self.assertEqual(self.emit(key, None), [])
+        argv = catalog.build_argv(catalog.catalog_defaults(), "m.gguf", "x")
+        for flag in ("--presence-penalty", "--frequency-penalty",
+                     "--repeat-penalty", "--repeat-last-n"):
+            self.assertNotIn(flag, argv)
 
     def test_tri_unset_emits_nothing(self):
         self.assertEqual(self.emit("kv_unified", None), [])
@@ -1804,13 +1845,22 @@ class TestRenderGroup(unittest.TestCase):
         for token in ("temp 0.6", "top-k 20", "top-p 0.95"):
             self.assertIn(token, text)
 
-    def test_penalties_row_shows_all_four(self):
-        """repeat defaults to 1.0, not 0.0 - it is a multiplier where 1.0 is the
-        no-op, unlike presence and frequency where 0.0 is."""
+    def test_penalties_are_unset_by_default_and_shown_as_such(self):
+        """No number should appear here until someone picks one. Pre-filling the
+        server's own defaults would put values on the board that nobody chose,
+        and they are not even uniform - 0.0 disables presence and frequency but
+        1.0 is what disables repeat - so a pre-filled row would mislead."""
         text = board.render_group(self.group("penalties"), self.values())
-        for token in ("presence 0.0", "frequency 0.0",
-                      "repeat 1.0", "repeat-last-n 64"):
+        for token in ("presence -", "frequency -", "repeat -", "repeat-last-n -"):
             self.assertIn(token, text)
+        for digit in "0123456789":
+            self.assertNotIn(digit, text)
+
+    def test_a_set_penalty_shows_its_value(self):
+        text = board.render_group(self.group("penalties"),
+                                  self.values(repeat_penalty=1.1))
+        self.assertIn("repeat 1.1", text)
+        self.assertIn("presence -", text)     # the others stay unset
 
     def test_toggles_render_on_and_off(self):
         text = board.render_group(self.group("toggles"),
@@ -1964,7 +2014,12 @@ from . import catalog
 
 def _fmt(setting, value):
     if value is None:
-        return None
+        # A tri-state vanishes when unset: showing "off" would claim we pass
+        # --no-flag when we pass nothing at all. A valued setting instead shows
+        # a dash, so the row still tells the user the setting exists while being
+        # honest that WE are not setting it - llama-server's own default applies.
+        # The dash is also what you type to put one back.
+        return None if setting.type == "tri" else f"{setting.label} -"
     if setting.key == "parallel" and value == -1:
         # -1 is llama-server's sentinel for "choose a slot count for me". Show
         # what it means, not the sentinel: gpu_layers already displays "auto"
@@ -2251,7 +2306,9 @@ def _prompt_for(setting, current):
         hint = "  (on / off / blank = leave to llama-server)"
     elif setting.type == "bool":
         hint = "  (y/n)"
-    shown = "" if current is None else current
+    if setting.default is None and setting.type not in ("tri", "bool"):
+        hint += "  (- for the llama-server default)"
+    shown = "-" if current is None else current
     if setting.type == "json" and isinstance(current, dict):
         shown = json.dumps(current) if current else ""
     return f"  {setting.label}{hint} [{shown}]: "
