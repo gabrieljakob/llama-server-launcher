@@ -99,6 +99,20 @@ def catalog_defaults():
     return {s.key: s.default for g in GROUPS for s in g.settings}
 
 
+def _range_error(setting, value):
+    """Bounds message, or None if the value is in range.
+
+    ASCII ONLY. This machine's console is cp1252; printing a non-ASCII character
+    raises UnicodeEncodeError and kills the launcher. An unbounded side is worded
+    rather than symbolised for exactly that reason."""
+    lo, hi = setting.lo, setting.hi
+    if lo is not None and value < lo:
+        return f"must be between {lo} and {hi}" if hi is not None else f"must be at least {lo}"
+    if hi is not None and value > hi:
+        return f"must be between {lo} and {hi}" if lo is not None else f"must be at most {hi}"
+    return None
+
+
 def parse_value(setting, text):
     """Parse user input for one setting. Returns (True, value) or (False, error)."""
     text = (text or "").strip()
@@ -123,23 +137,16 @@ def parse_value(setting, text):
             value = int(text)
         except ValueError:
             return False, "enter a whole number"
-        if setting.lo is not None and value < setting.lo:
-            hi = setting.hi if setting.hi is not None else "∞"
-            return False, f"must be between {setting.lo} and {hi}"
-        if setting.hi is not None and value > setting.hi:
-            return False, f"must be between {setting.lo} and {setting.hi}"
-        return True, value
+        err = _range_error(setting, value)
+        return (False, err) if err else (True, value)
 
     if t == "float":
         try:
             value = float(text)
         except ValueError:
             return False, "enter a number"
-        if setting.lo is not None and value < setting.lo:
-            return False, f"must be between {setting.lo} and {setting.hi}"
-        if setting.hi is not None and value > setting.hi:
-            return False, f"must be between {setting.lo} and {setting.hi}"
-        return True, value
+        err = _range_error(setting, value)
+        return (False, err) if err else (True, value)
 
     if t == "choice":
         if text in setting.choices:

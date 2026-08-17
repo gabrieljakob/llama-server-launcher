@@ -36,6 +36,29 @@ class TestParseValue(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("1 and 65535", err)
 
+    def test_unbounded_side_is_worded_not_symbolised(self):
+        """context has a lower bound and no upper one. The message must stay
+        ASCII: this console is cp1252 and printing a non-ASCII character raises
+        UnicodeEncodeError, which would crash the launcher mid-edit."""
+        ok, err = self.parse("context", "-5")
+        self.assertFalse(ok)
+        self.assertEqual(err, "must be at least 1")
+        err.encode("cp1252")            # raises if a non-ASCII char creeps back in
+
+    def test_every_error_message_survives_the_console_encoding(self):
+        """Belt and braces across all types - any non-ASCII in a user-facing
+        message is a latent crash."""
+        cases = [("context", "big"), ("context", "-5"), ("port", "70000"),
+                 ("temp", "nope"), ("top_p", "1.5"), ("cache_type_k", "q3_0"),
+                 ("gpu_layers", "most"), ("kv_unified", "maybe"),
+                 ("jinja", "maybe"), ("spec_type", "draft-mtp,nonsense"),
+                 ("chat_template_kwargs", "{oops"),
+                 ("chat_template_kwargs", "[1,2]")]
+        for key, text in cases:
+            ok, err = self.parse(key, text)
+            self.assertFalse(ok, f"{key}={text!r} should have been rejected")
+            err.encode("cp1252")
+
     def test_float_accepts_decimal(self):
         self.assertEqual(self.parse("temp", "0.6"), (True, 0.6))
 
