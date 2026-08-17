@@ -15,6 +15,10 @@ SPEC_TYPES = ["none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash
               "ngram-mod", "ngram-cache"]
 ONOFFAUTO = ["on", "off", "auto"]
 
+# Passed through to the chat template, which decides what it honours - llama-server
+# itself accepts any string here. These are the levels build 10453 documents.
+REASONING_EFFORTS = ["default", "minimal", "low", "medium", "high", "xhigh", "max"]
+
 # Spec types needing a separate draft-model GGUF. draft-mtp is deliberately absent:
 # the multi-token-prediction head is built into the model's own weights.
 DRAFT_MODEL_TYPES = {"draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark"}
@@ -61,6 +65,8 @@ GROUPS = [
         Setting("jinja", "--jinja", "jinja", "bool", True),
         Setting("no_mmproj", "--no-mmproj", "no-mmproj", "bool", True),
         Setting("reasoning", "--reasoning", "reasoning", "choice", "auto", ONOFFAUTO),
+        Setting("reasoning_effort", "--reasoning-effort", "effort", "choice",
+                "default", REASONING_EFFORTS),
         Setting("reasoning_preserve", "--reasoning-preserve", "reason-preserve", "tri", None),
         Setting("metrics", "--metrics", "metrics", "bool", False),
         Setting("flash_attn", "--flash-attn", "fa", "choice", "on", ONOFFAUTO),
