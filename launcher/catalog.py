@@ -5,7 +5,7 @@ its allowed values change, update CACHE_TYPES / SPEC_TYPES below.
 """
 import copy
 import json
-import shlex
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -121,7 +121,53 @@ def settings_by_key():
 
 
 def catalog_defaults():
-    return copy.deepcopy({s.key: s.default for g in GROUPS for s in g.settings})
+    # deepcopy, not a plain dict comprehension: at least one default is mutable
+    # (chat_template_kwargs is {}). Handing every caller the same object means one
+    # caller mutating it in place poisons the default for the whole process, and
+    # every config created afterwards silently inherits the change.
+    return {s.key: copy.deepcopy(s.default) for g in GROUPS for s in g.settings}
+
+
+def split_extra(text):
+    """Split the extra-args row using WINDOWS rules, not POSIX.
+
+    shlex.split is POSIX: it treats backslash as an escape, so
+        --lora D:\\LLM Models\\adapters\\x.gguf
+    became ['--lora', 'D:LLM', 'Modelsadaptersx.gguf'] - silently corrupted and
+    handed to a real server. Every path on this machine has backslashes, and
+    extra-args exists precisely for path-bearing flags like --chat-template-file
+    and --lora, so POSIX rules were wrong for this field in every realistic use.
+
+    Windows rules: backslash is an ordinary character, only " groups, and a
+    doubled "" inside a quoted run is a literal quote. Unbalanced quotes are
+    reported rather than raised - this text comes from a config file that may
+    have been hand-edited.
+
+    Returns (True, [args]) or (False, error)."""
+    args, cur, in_quotes, started = [], [], False, False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            if in_quotes and i + 1 < len(text) and text[i + 1] == '"':
+                cur.append('"')          # "" inside quotes is a literal quote
+                i += 2
+                continue
+            in_quotes = not in_quotes
+            started = True
+        elif c.isspace() and not in_quotes:
+            if started or cur:
+                args.append("".join(cur))
+                cur, started = [], False
+        else:
+            cur.append(c)
+            started = True
+        i += 1
+    if in_quotes:
+        return False, 'unbalanced quote - every " needs a closing one'
+    if started or cur:
+        args.append("".join(cur))
+    return True, args
 
 
 def _range_error(setting, value):
@@ -151,11 +197,16 @@ def parse_value(setting, text):
         return True, None
 
     if t == "tri":
-        if text == "":
+        # "-" unsets, NOT blank. Blank means "keep what is there" for every
+        # other type, and the prompt shows the current value in brackets, so
+        # making blank destructive here silently erased a saved setting the
+        # moment anyone pressed Enter through this row. One convention, no
+        # exceptions: blank keeps, "-" clears.
+        if text == "-":
             return True, None
         if text in ("on", "off"):
             return True, text
-        return False, "enter 'on', 'off', or blank to leave unset"
+        return False, "enter 'on', 'off', or '-' to leave it to llama-server"
 
     if t == "bool":
         if text.lower() in ("y", "yes", "true", "on", "1"):
@@ -177,6 +228,12 @@ def parse_value(setting, text):
             value = float(text)
         except ValueError:
             return False, "enter a number"
+        # nan defeats every bound: nan < lo and nan > hi are BOTH False, so a
+        # nan sails past _range_error into the config file - where json.dump
+        # writes a bare NaN, which is not valid JSON and no strict parser will
+        # read back. inf slips through any bound that has no upper limit.
+        if not math.isfinite(value):
+            return False, "enter a finite number"
         err = _range_error(setting, value)
         return (False, err) if err else (True, value)
 
@@ -188,17 +245,48 @@ def parse_value(setting, text):
     if t == "gpu_layers":
         if text in ("auto", "all"):
             return True, text
-        if text.isdigit():
+        # ASCII decimal digits, and isdigit() alone is NOT that test. This value
+        # is stored AS TEXT and emit() sends the text - unlike the int type,
+        # where int() normalises the digits and str() writes them back as ASCII,
+        # nothing rewrites this one on the way out. So superscript two (isdigit,
+        # and int() refuses it), Arabic-Indic three and the fullwidth digits
+        # (isdigit AND isdecimal, and int() reads them fine) all used to be
+        # accepted here and then handed to llama-server verbatim, which answers
+        #     error while handling argument "-ngl": invalid stoi argument
+        # and EXITS 0 - so wait_ready reports "exited with code 0 before the
+        # port opened" and names nothing the user could act on.
+        #
+        # board.dispatch can afford isdecimal() because it converts with int()
+        # and uses the int. Here the characters themselves are the argument, so
+        # isascii() is what keeps the stored value and the -ngl argument the
+        # same string.
+        if text.isascii() and text.isdigit():
             return True, text
         return False, "enter 'auto', 'all', or a layer count"
 
     if t == "spec_type":
-        parts = [p.strip() for p in text.split(",") if p.strip()]
+        parts = _spec_parts(text)
         if not parts:
             return True, "none"
         for p in parts:
             if p not in SPEC_TYPES:
                 return False, f"unknown spec type {p!r}; allowed: " + ", ".join(SPEC_TYPES)
+        # 'none' means no speculative decoding AT ALL: it is the whole list, or
+        # the list is wrong. BOTH bad shapes used to be accepted here.
+        # "none,draft-mtp" is a contradiction build 10453 does not diagnose - it
+        # takes the token without a word, leaving the user to guess which half
+        # won. "none,none" was worse: it passed straight through to spec_error,
+        # which indexed an empty 'others' list and took the launcher down with an
+        # IndexError, from the speculative row, on Enter.
+        if "none" in parts and len(parts) > 1:
+            others = [p for p in parts if p != "none"]
+            if others:
+                return False, (f"'none' cannot be combined with {others[0]!r} - "
+                               f"'none' means no speculative decoding at all. "
+                               f"Drop one of them.")
+            return False, (f"'none' is listed {len(parts)} times - 'none' means "
+                           f"no speculative decoding at all; write it once, "
+                           f"on its own.")
         return True, ",".join(parts)
 
     if t == "json":
@@ -213,11 +301,18 @@ def parse_value(setting, text):
         return True, value
 
     if t == "raw":
-        try:
-            shlex.split(text)
-        except ValueError as exc:
-            return False, f"unbalanced quoting: {exc}"
-        return True, text
+        # "-" clears the row, exactly as it does on the penalties rows. The
+        # generic unset branch above cannot cover this one, because the catalog
+        # default here is "" rather than None - so "-" used to be stored as a
+        # LITERAL "-", emitted as a bare argument, and rejected by the binary.
+        # Blank keeps the current value for every type, so without this there
+        # was no way back to an empty extra-args row at all. "" and not None:
+        # the board renders a raw value only when it is a string, and the empty
+        # string is what emit() already treats as "send nothing".
+        if text == "-":
+            return True, ""
+        ok, result = split_extra(text)
+        return (True, text) if ok else (False, result)
 
     return True, text            # str, path
 
@@ -244,34 +339,157 @@ def emit(setting, value):
         return []
 
     if t == "json":
-        if not value:
+        # isinstance, not just truthiness: a hand-edited config can put a string
+        # or a list here, and json.dumps would happily serialise either into a
+        # --chat-template-kwargs llama-server rejects. Dropping it keeps the
+        # launch usable; the board still shows the bad value so it can be fixed.
+        if not isinstance(value, dict) or not value:
             return []
         return [setting.flag, json.dumps(value, separators=(",", ":"))]
 
     if t == "raw":
-        return shlex.split(value) if value else []
+        if not value:
+            return []
+        if not isinstance(value, str):
+            return []            # a number here is not an argument list
+        ok, args = split_extra(value)
+        # Unbalanced quoting is rejected at edit time; a hand-edited config can
+        # still carry it, and dropping the row beats raising mid-launch.
+        return args if ok else []
+
+    if t == "spec_type":
+        # NORMALISED, not raw. parse_value and spec_error both judge the split
+        # form, so emitting the stored text verbatim sent something neither of
+        # them ever saw: a hand-edited "ngram-mod, ngram-cache" (one space)
+        # passes every check here and then reaches build 10453 as
+        # "unknown speculative type:  ngram-cache" - the leading space is part
+        # of the type name by the time the binary splits it. What was validated
+        # is what gets sent.
+        parts = _spec_parts(value)
+        return [setting.flag, ",".join(parts)] if parts else []
 
     return [setting.flag, str(value)]
 
 
-def spec_types_of(values):
-    raw = values.get("spec_type") or "none"
+def _spec_parts(raw):
+    """Split one raw --spec-type value into its members, whitespace stripped.
+
+    str(): everything downstream - the board, active_keys, emit, build_argv -
+    goes through here, and a hand-edited config can hold a number or a list on
+    this key. Coercing once, in one place, is what keeps all of them total;
+    raising would take the board down before the user could reach the row to
+    fix it."""
+    if not isinstance(raw, str):
+        raw = str(raw)
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-def spec_error(values):
-    """Validate the speculative group before launch. None means OK."""
+def spec_types_of(values):
+    """The spec types as a list of strings."""
+    return _spec_parts(values.get("spec_type") or "none")
+
+
+def _spec_off(types):
+    """True when this list means 'no speculative decoding'.
+
+    Every member 'none', not just the single-element list: "none,none" is
+    refused before launch, but until the user fixes it the board still renders
+    and build_argv still runs, and a config that says nothing but 'none' must
+    not emit --spec-* flags on the way through."""
+    return not types or all(t == "none" for t in types)
+
+
+def draft_model_set(values):
+    """True when draft_model actually names something.
+
+    Blank after strip is ABSENT, not a path. '   ' is truthy in Python, so it
+    satisfied every `if values.get("draft_model")` in the launcher: spec_error
+    accepted it as the draft model a draft-* type requires, and the launch then
+    resolved it into the model root plus three spaces and said only "draft model
+    is gone". Whitespace is not a path anyone typed on purpose - it is an empty
+    row with a stray space in it, and it must be refused where the message can
+    still name the row."""
+    draft = values.get("draft_model")
+    return isinstance(draft, str) and bool(draft.strip())
+
+
+def spec_carries_own_head(values):
+    """True when the current spec type is RECOGNISED and genuinely runs without
+    a separate draft GGUF - draft-mtp and the ngram-* family.
+
+    Deliberately not the same question as `"draft_model" not in active_keys`.
+    active_keys drops draft_model for anything that is not a known draft-* type,
+    which includes a type it has never heard of: a hand-edited "ngram-modd"
+    dropped the key exactly as "ngram-mod" does. Any caller that read that as
+    "this model carries its own prediction head" was believing something about a
+    string the catalog cannot interpret at all.
+
+    'none' is False as well. It does not carry its own head, it means no
+    speculative decoding, and "none,ngram-mod" is a contradiction spec_error
+    refuses - neither is a state to draw conclusions about the model from."""
     types = spec_types_of(values)
-    if types == ["none"] or not types:
+    if not types or any(t not in SPEC_TYPES for t in types):
+        return False
+    if "none" in types:
+        return False
+    return not any(t in DRAFT_MODEL_TYPES for t in types)
+
+
+def spec_error(values):
+    """Validate the speculative group before launch. None means OK.
+
+    TOTAL: it returns a string or None for ANY values dict, whatever JSON types
+    a hand edit put on these keys. It gates both [Enter] and [c], so raising
+    here takes down the only screen the value could be repaired from."""
+    types = spec_types_of(values)
+
+    # Checked first, and regardless of the spec type, because this one is not
+    # merely invalid - it is a TypeError in the caller. Both launch and [c] do
+    #     config.resolve_path(values["draft_model"], root)
+    # whenever the value is truthy, and os.path.isabs(7) raises. Refusing here
+    # is what turns a traceback out of a hand-edited number into a message.
+    draft = values.get("draft_model")
+    if draft is not None and not isinstance(draft, str):
+        return (f"draft model must be a path, not a {type(draft).__name__} "
+                f"({draft!r}) - fix or clear it on the speculative row")
+
+    # 'none' means no speculative decoding AT ALL, so it cannot be one member of
+    # a list - "none,draft-mtp" is a contradiction. Checked here because build
+    # 10453 does NOT check it: verified with --model nonexistent.gguf, the
+    # binary accepts "none,draft-mtp" without a word, so the user is left
+    # guessing which half of their contradiction won. Refusing is the only way
+    # they find out they wrote one.
+    if "none" in types and len(types) > 1:
+        others = [t for t in types if t != "none"]
+        # `others` is EMPTY for "none,none". Indexing it unguarded is what made
+        # this function raise IndexError instead of returning a message.
+        if others:
+            return (f"spec-type cannot combine 'none' with {others[0]!r} - 'none' "
+                    f"means no speculative decoding at all. Drop one of them.")
+        return (f"spec-type lists 'none' {len(types)} times - 'none' means no "
+                f"speculative decoding at all; write it once, on its own.")
+    unknown = [t for t in types if t not in SPEC_TYPES]
+    if unknown:
+        # parse_value rejects these at edit time; only a hand-edited config gets
+        # here. Verified against build 10453: the binary refuses an unknown type
+        # with "unknown speculative type: 3" - and then EXITS 0, so wait_ready
+        # reports "exited with code 0 before the port opened" and names nothing.
+        return (f"unknown spec-type {unknown[0]!r} on the speculative row; "
+                f"allowed: " + ", ".join(SPEC_TYPES))
+    if _spec_off(types):
         return None
     needs_draft = [t for t in types if t in DRAFT_MODEL_TYPES]
-    has_draft = bool(values.get("draft_model"))
-    if needs_draft and not has_draft:
+    if needs_draft and not draft_model_set(values):
         return (f"spec-type {needs_draft[0]!r} needs a draft model "
                 f"- set one on the speculative row")
-    if "draft-mtp" in types and has_draft:
-        return ("spec-type 'draft-mtp' takes no draft model - MTP is built into "
-                "the model's own weights; clear the draft model row")
+    # A draft model left over from a previous spec type is NOT refused. For
+    # draft-mtp and every ngram-* type active_keys already drops draft_model, so
+    # the flag provably cannot reach llama-server - the command line is already
+    # correct, and refusing it blocked a launch that had nothing wrong with it.
+    # The old message ("clear the draft model row") named a row the board hides
+    # for exactly these types: an instruction the UI cannot obey, which is a
+    # dead end for a hand-edited config. edit_group clears the stale value, and
+    # says so, the next time the speculative row is opened.
     return None
 
 
@@ -280,7 +498,7 @@ def active_keys(values):
     keys = {s.key for g in GROUPS for s in g.settings}
     types = spec_types_of(values)
 
-    if types == ["none"] or not types:
+    if _spec_off(types):
         return keys - {"spec_type", "draft_model", "spec_ngl",
                        "spec_n_max", "spec_n_min", "spec_p_min"}
 

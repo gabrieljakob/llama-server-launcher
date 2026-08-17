@@ -76,6 +76,93 @@ class TestLoad(unittest.TestCase):
             config.load(path)
         self.assertIn("line", str(ctx.exception))
 
+    def test_a_non_utf8_file_reports_instead_of_tracebacking(self):
+        """Every editor on this machine defaults to cp1252, so one umlaut in a
+        model name is enough to produce a file we cannot decode. That is a
+        UnicodeDecodeError - a ValueError, neither a JSONDecodeError nor an
+        OSError - so it escaped both existing guards."""
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "wb") as f:
+            f.write('{"model_root": "D:/M\u00fcnchen"}'.encode("cp1252"))
+        self.addCleanup(os.unlink, path)
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load(path)
+        message = str(ctx.exception)
+        self.assertIn(path, message, "the message must name the file")
+        self.assertIn("UTF-8", message)
+        message.encode("cp1252")
+
+    def test_an_unreadable_path_reports_instead_of_tracebacking(self):
+        """A config replaced by a DIRECTORY - or locked by another program - is
+        an OSError, not a FileNotFoundError, and reached the user raw."""
+        folder = tempfile.mkdtemp()
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load(folder)
+        self.assertIn(folder, str(ctx.exception))
+
+    def test_a_missing_file_still_says_so(self):
+        """Otherwise a blanket guard could report every failure as the wrong one."""
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.load(os.path.join(tempfile.mkdtemp(), "nope.json"))
+        self.assertIn("not found", str(ctx.exception))
+
+
+class TestDocumentError(unittest.TestCase):
+    """Valid JSON is not a valid document. Each of these used to surface as a
+    KeyError or TypeError from whichever line happened to read the key first."""
+
+    PATH = "D:/Scripts/launcher_configs.json"
+
+    def doc(self, **over):
+        d = {"version": 2, "model_root": "D:/M", "llama_server": "D:/s.exe",
+             "defaults": {}, "configs": [{"name": "c", "model": "m.gguf"}]}
+        d.update(over)
+        return d
+
+    def error(self, document):
+        return config.document_error(document, self.PATH)
+
+    def test_a_complete_document_has_no_error(self):
+        self.assertIsNone(self.error(self.doc()))
+
+    def test_an_empty_configs_list_is_fine(self):
+        """A brand-new document has no configs yet; that is not an error."""
+        self.assertIsNone(self.error(self.doc(configs=[])))
+
+    def test_every_missing_key_is_named_along_with_the_file(self):
+        for key in ("model_root", "llama_server", "configs"):
+            with self.subTest(key=key):
+                document = self.doc()
+                del document[key]
+                message = self.error(document)
+                self.assertIsNotNone(message)
+                self.assertIn(key, message)
+                self.assertIn(self.PATH, message)
+
+    def test_a_config_missing_name_or_model_is_named(self):
+        for key in ("name", "model"):
+            with self.subTest(key=key):
+                cfg = {"name": "c", "model": "m.gguf"}
+                del cfg[key]
+                message = self.error(self.doc(configs=[cfg]))
+                self.assertIsNotNone(message)
+                self.assertIn(key, message)
+
+    def test_wrong_types_are_caught_as_well_as_missing_keys(self):
+        for document in (self.doc(model_root=5), self.doc(llama_server=[1]),
+                         self.doc(configs={"a": 1}), self.doc(configs=["str"]),
+                         self.doc(configs=[{"name": 5, "model": "m.gguf"}]),
+                         self.doc(configs=[{"name": "c", "model": 5}]),
+                         self.doc(configs=[{"name": "c", "model": "m",
+                                            "settings": []}]),
+                         self.doc(defaults=[]), ["not a document"], "text", None):
+            with self.subTest(document=document):
+                self.assertIsNotNone(self.error(document))
+
+    def test_the_messages_survive_the_console_encoding(self):
+        message = self.error(self.doc(configs=[{"name": "c"}]))
+        message.encode("cp1252")
+
 
 class TestMigration(unittest.TestCase):
     ROOT = "D:/LLM Models"
@@ -174,6 +261,63 @@ class TestMigrationRobustness(unittest.TestCase):
         doc, _ = self.migrate({"defaults": {"flash_attn": "auto"}, "models": []})
         self.assertEqual(doc["defaults"]["flash_attn"], "auto")
 
+    def test_a_models_key_that_is_not_a_list_is_reported_not_fatal(self):
+        """Migration is unattended and runs on the user's only config. Every
+        wrong SHAPE below ended it with an AttributeError instead, leaving the
+        launcher with no v2 document at all.
+
+        Both shapes are checked on purpose. A number is not iterable at all; a
+        dict IS, one key at a time, so without a check on `models` itself the
+        per-entry guard would quietly absorb it and report the wrong thing."""
+        for models in (5, "Qwen3.6", {"a": 1}):
+            with self.subTest(models=models):
+                doc, report = self.migrate({"defaults": {}, "models": models})
+                self.assertEqual(doc["configs"], [])
+                self.assertTrue(
+                    any("models" in line for line in report),
+                    f"the report must name 'models': {report}")
+
+    def test_an_entry_that_is_not_an_object_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            "just a string",
+            {"name": "good", "alias": "good", "path": "D:/LLM Models/a/b.gguf"},
+        ]})
+        self.assertEqual([c["name"] for c in doc["configs"]], ["good"])
+        self.assertTrue(any("SKIPPED entry 1" in line for line in report))
+
+    def test_an_entry_whose_path_is_not_a_string_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": "broken", "path": 5},
+            {"name": "good", "alias": "good", "path": "D:/LLM Models/a/b.gguf"},
+        ]})
+        self.assertEqual([c["name"] for c in doc["configs"]], ["good"])
+        self.assertTrue(any("SKIPPED entry 1" in line and "path" in line
+                            for line in report))
+
+    def test_an_entry_whose_name_is_not_a_string_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": 7, "path": "D:/LLM Models/a/b.gguf"}]})
+        self.assertEqual(doc["configs"], [])
+        self.assertTrue(any("SKIPPED" in line for line in report))
+
+    def test_overrides_that_are_not_an_object_are_dropped_with_a_warning(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": "good", "path": "D:/LLM Models/a/b.gguf",
+             "overrides": ["context", 4096]}]})
+        self.assertEqual(doc["configs"][0]["settings"], {})
+        self.assertTrue(any("WARNING" in line for line in report))
+
+    def test_a_legacy_file_that_is_not_an_object_at_all_is_reported(self):
+        doc, report = self.migrate(["not", "a", "profiles", "document"])
+        self.assertEqual(doc["configs"], [])
+        self.assertEqual(doc["version"], 2)
+        self.assertTrue(any("SKIPPED" in line for line in report))
+
+    def test_every_skip_message_survives_the_console_encoding(self):
+        _, report = self.migrate({"models": [5, {"path": 1, "name": "x"}]})
+        for line in report:
+            line.encode("cp1252")
+
     def test_non_ascii_model_name_survives_migration(self):
         """Model names are user data off the user's disk and may contain
         anything. migrate() must carry them through verbatim without raising and
@@ -250,6 +394,24 @@ class TestSave(unittest.TestCase):
         with self.assertRaises(Exception):
             config.save(path, unserialisable)
         self.assertEqual(os.listdir(folder), ["cfg.json"])
+
+    def test_a_failing_save_raises_one_catchable_type_naming_the_file(self):
+        """[s] must report and keep the board up. That needs a single exception
+        type callers can name - a raw TypeError out of json.dump ended the
+        session and took every unsaved edit with it."""
+        path = os.path.join(tempfile.mkdtemp(), "cfg.json")
+        unserialisable = self.doc()
+        unserialisable["configs"] = [{"bad": object()}]
+        with self.assertRaises(config.ConfigError) as ctx:
+            config.save(path, unserialisable)
+        self.assertIn(path, str(ctx.exception))
+
+    def test_an_unwritable_target_also_raises_that_type(self):
+        folder = tempfile.mkdtemp()
+        target = os.path.join(folder, "sub")
+        os.mkdir(target)                 # os.replace cannot overwrite a directory
+        with self.assertRaises(config.ConfigError):
+            config.save(target, self.doc())
 
     def test_temp_path_is_same_directory_and_process_qualified(self):
         """Same directory keeps os.replace atomic - it is only atomic within one

@@ -95,6 +95,34 @@ class TestParseValue(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("xhigh", err)
 
+    def test_float_rejects_nan_and_infinity(self):
+        """nan defeats every bound - nan < lo and nan > hi are BOTH False - so
+        it reached the config file, where json.dump writes a bare NaN that is
+        not valid JSON and no strict parser will read back."""
+        for key, text in [("top_p", "nan"), ("min_p", "NaN"), ("temp", "inf"),
+                          ("spec_p_min", "-inf"), ("temp", "1e999")]:
+            with self.subTest(key=key, text=text):
+                ok, _ = self.parse(key, text)
+                self.assertFalse(ok, f"{key}={text} must be rejected")
+
+    def test_extra_args_keep_windows_backslashes(self):
+        """POSIX shlex ate them: a --lora path became 'D:LLM' plus
+        'Modelsadaptersx.gguf', silently, on the way to a real server."""
+        ok, args = catalog.split_extra('--lora "D:\\LLM Models\\adapters\\x.gguf"')
+        self.assertTrue(ok)
+        self.assertEqual(args, ["--lora", "D:\\LLM Models\\adapters\\x.gguf"])
+
+    def test_extra_args_split_unquoted_input_on_spaces_only(self):
+        ok, args = catalog.split_extra("--chat-template-file D:\\t\\qwen.jinja")
+        self.assertTrue(ok)
+        self.assertEqual(args, ["--chat-template-file", "D:\\t\\qwen.jinja"])
+
+    def test_extra_args_report_an_unbalanced_quote(self):
+        ok, err = catalog.split_extra('--api-key "sk-abc')
+        self.assertFalse(ok)
+        self.assertIn("unbalanced", err)
+        self.assertFalse(self.parse("extra", '--api-key "sk-abc')[0])
+
     def test_a_server_default_setting_can_be_set_and_unset(self):
         """Settings whose catalog default is None are ones we simply do not pass.
         They must be resettable, or a value set once could never be cleared."""
@@ -120,8 +148,47 @@ class TestParseValue(unittest.TestCase):
         self.assertEqual(self.parse("gpu_layers", "99"), (True, "99"))
         self.assertFalse(self.parse("gpu_layers", "most")[0])
 
+    def test_gpu_layers_refuses_digits_the_binary_cannot_read(self):
+        """isdigit() is not the guard here, and isdecimal() is not either.
+
+        This setting is STORED AS TEXT and emit() sends the text - there is no
+        int() in the path to normalise it, unlike the int type. So a pasted
+        superscript two, an Arabic-Indic three or a fullwidth 99 - all isdigit,
+        the last two isdecimal as well - used to be accepted, written to the
+        config file and handed to llama-server verbatim, which answers
+            error while handling argument "-ngl": invalid stoi argument
+        and then EXITS 0. wait_ready reports "exited with code 0 before the port
+        opened" and names nothing at all. Both -ngl rows go through this branch,
+        so both are checked.
+
+        The characters are built with chr() rather than written out: every
+        literal in this repo stays ASCII, because the console is cp1252 and a
+        non-ASCII character reaching print() kills the launcher."""
+        superscript_two, arabic_three = chr(0xB2), chr(0x663)
+        fullwidth_nine = chr(0xFF19)
+        for key in ("gpu_layers", "spec_ngl"):
+            for text in (superscript_two, arabic_three,
+                         fullwidth_nine * 2, "9" + arabic_three):
+                with self.subTest(key=key, text=text):
+                    ok, err = self.parse(key, text)
+                    self.assertFalse(ok, f"{text!r} must not be accepted")
+                    self.assertTrue(err.isascii(), "message must stay ASCII")
+
+    def test_the_int_type_normalises_such_digits_instead(self):
+        """The same characters on an int setting are NOT a defect: parse_value
+        returns the int, and emit() writes str(int), which is ASCII. Asserted so
+        that the gpu_layers guard is not copied onto rows that do not need it."""
+        ok, value = self.parse("context", chr(0x663))
+        self.assertTrue(ok)
+        self.assertEqual(value, 3)
+        setting = catalog.settings_by_key()["context"]
+        self.assertEqual(catalog.emit(setting, value), ["-c", "3"])
+
     def test_tri_accepts_three_states(self):
-        self.assertEqual(self.parse("kv_unified", ""), (True, None))
+        # "-" is the unset token, not blank: blank now means "keep the current
+        # value" for every type, so that pressing Enter through the toggles row
+        # cannot erase a saved setting.
+        self.assertEqual(self.parse("kv_unified", "-"), (True, None))
         self.assertEqual(self.parse("kv_unified", "on"), (True, "on"))
         self.assertEqual(self.parse("kv_unified", "off"), (True, "off"))
 
@@ -138,6 +205,20 @@ class TestParseValue(unittest.TestCase):
         ok, err = self.parse("spec_type", "draft-mtp,nonsense")
         self.assertFalse(ok)
         self.assertIn("nonsense", err)
+
+    def test_a_near_miss_typo_is_refused_at_the_prompt_and_names_itself(self):
+        """This is where a typo is SUPPOSED to be caught, and it already is - so
+        the only way 'ngram-modd' reaches the board is a hand-edited config, and
+        the row must survive being visited with one on it. Locked in here
+        because the repair path in board.edit_group depends on it: nothing
+        typed at that prompt can put an unknown type into the values."""
+        for typo in ("ngram-modd", "draft-mtpp", "ngramm-mod", "NGRAM-MOD",
+                     "ngram-mod,ngram-cach"):
+            with self.subTest(typo=typo):
+                ok, err = self.parse("spec_type", typo)
+                self.assertFalse(ok, f"{typo!r} must not be accepted")
+                self.assertIn("unknown spec type", err)
+                self.assertTrue(err.isascii())
 
     def test_json_accepts_object_and_rejects_array(self):
         self.assertEqual(
@@ -189,7 +270,7 @@ class TestEmit(unittest.TestCase):
     def test_empty_json_emits_nothing(self):
         self.assertEqual(self.emit("chat_template_kwargs", {}), [])
 
-    def test_raw_is_shlex_split(self):
+    def test_raw_is_split_with_windows_rules(self):
         self.assertEqual(self.emit("extra", '--props --alias "my model"'),
                          ["--props", "--alias", "my model"])
 
@@ -231,11 +312,16 @@ class TestSpecGating(unittest.TestCase):
         self.assertIn("--spec-draft-n-max", argv)
         self.assertIn("--spec-draft-p-min", argv)
 
-    def test_mtp_with_a_draft_model_is_rejected(self):
+    def test_mtp_with_a_stale_draft_model_still_launches_without_the_flag(self):
+        """It used to be refused, with a message telling the user to clear a row
+        the board hides for exactly this type. active_keys already drops
+        draft_model for draft-mtp, so the flag provably cannot be sent: the
+        command line is correct and there is nothing left to refuse."""
         v = self.values(spec_type="draft-mtp", draft_model="d.gguf")
-        err = catalog.spec_error(v)
-        self.assertIsNotNone(err)
-        self.assertIn("built into", err)
+        self.assertIsNone(catalog.spec_error(v))
+        argv = catalog.build_argv(v, "m.gguf", "a")
+        self.assertNotIn("--spec-draft-model", argv)
+        self.assertNotIn("d.gguf", argv)
 
     def test_ngram_needs_no_draft_model(self):
         v = self.values(spec_type="ngram-mod")
@@ -243,6 +329,19 @@ class TestSpecGating(unittest.TestCase):
         argv = catalog.build_argv(v, "m.gguf", "a")
         self.assertNotIn("--spec-draft-model", argv)
         self.assertIn("--spec-type", argv)
+
+    def test_every_draft_model_type_requires_a_draft_model(self):
+        """The final review found draft-simple and draft-eagle3 appeared in NO
+        test: removing either from DRAFT_MODEL_TYPES let a draft-less config
+        launch and the suite stayed green. Cover all four by name."""
+        for spec_type in ("draft-simple", "draft-eagle3", "draft-dflash",
+                          "draft-dspark"):
+            with self.subTest(spec_type=spec_type):
+                err = catalog.spec_error(self.values(spec_type=spec_type))
+                self.assertIsNotNone(err, f"{spec_type} must demand a draft model")
+                self.assertIn("draft model", err)
+                ok = self.values(spec_type=spec_type, draft_model="d.gguf")
+                self.assertIsNone(catalog.spec_error(ok))
 
     def test_none_drops_spec_type_from_emission_but_not_from_editing(self):
         """The two key sets differ by exactly this one key. Without it, row 8
@@ -255,6 +354,92 @@ class TestSpecGating(unittest.TestCase):
     def test_editable_and_active_agree_once_spec_is_on(self):
         v = self.values(spec_type="draft-mtp")
         self.assertEqual(catalog.editable_keys(v), catalog.active_keys(v))
+
+
+class TestWrongTypesNeverRaise(unittest.TestCase):
+    """A hand-edited config can hold any JSON type on any key. build_argv is
+    reached from [Enter] and from [c], and neither may traceback - the board is
+    the only place the value can be repaired, so the tool has to survive long
+    enough to get there. The bad value must also not be smuggled into argv."""
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def argv(self, **over):
+        return catalog.build_argv(self.values(**over), "m.gguf", "a")
+
+    def test_a_number_in_the_extra_args_row_emits_nothing(self):
+        argv = self.argv(extra=5)
+        self.assertNotIn("5", argv)
+        self.assertNotIn(5, argv)
+
+    def test_an_unbalanced_quote_in_extra_args_emits_nothing(self):
+        argv = self.argv(extra='--api-key "sk-abc')
+        self.assertNotIn("--api-key", argv)
+
+    def test_a_non_object_chat_template_kwargs_emits_nothing(self):
+        """json.dumps would serialise a bare string quite happily and hand
+        llama-server a --chat-template-kwargs it refuses to parse."""
+        for bad in ("x", [1, 2], 7):
+            with self.subTest(bad=bad):
+                self.assertNotIn("--chat-template-kwargs", self.argv(
+                    chat_template_kwargs=bad))
+
+    def test_a_valid_chat_template_kwargs_is_still_emitted(self):
+        """Otherwise 'always drop it' would pass the test above."""
+        self.assertIn("--chat-template-kwargs",
+                      self.argv(chat_template_kwargs={"preserve_thinking": True}))
+
+    def test_a_number_as_the_spec_type_does_not_raise(self):
+        argv = self.argv(spec_type=3)
+        self.assertIn("--model", argv)
+        self.assertEqual(catalog.spec_types_of(self.values(spec_type=3)), ["3"])
+
+    def test_a_wrong_typed_spec_type_is_refused_by_name_at_launch(self):
+        err = catalog.spec_error(self.values(spec_type=3))
+        self.assertIsNotNone(err)
+        self.assertIn("3", err)
+        err.encode("cp1252")
+
+    def test_every_setting_survives_a_wrong_typed_value(self):
+        """Swept rather than enumerated: a new row must not reopen this hole."""
+        for setting in (s for g in catalog.GROUPS for s in g.settings):
+            for bad in (5, "x", [1], {"a": 1}, True):
+                with self.subTest(key=setting.key, bad=bad):
+                    out = catalog.build_argv(self.values(**{setting.key: bad}),
+                                             "m.gguf", "a")
+                    self.assertTrue(all(isinstance(x, str) for x in out),
+                                    "argv must be strings all the way down")
+
+
+class TestSpecTypeNoneIsNotAListMember(unittest.TestCase):
+    """--spec-type takes a comma-separated list, and 'none' means no
+    speculative decoding AT ALL. "none,draft-mtp" is a contradiction that the
+    launcher used to emit as one token for llama-server to choke on."""
+
+    def values(self, spec_type):
+        v = catalog.catalog_defaults()
+        v["spec_type"] = spec_type
+        return v
+
+    def test_none_mixed_with_a_real_type_is_rejected(self):
+        for text in ("none,draft-mtp", "draft-mtp,none", "none,ngram-mod",
+                     "none,none,draft-dflash"):
+            with self.subTest(text=text):
+                err = catalog.spec_error(self.values(text))
+                self.assertIsNotNone(err, f"{text} must be refused")
+                self.assertIn("none", err)
+                err.encode("cp1252")
+
+    def test_none_on_its_own_is_still_fine(self):
+        """Otherwise 'reject anything mentioning none' would pass the test
+        above and no config could ever launch without speculative decoding."""
+        self.assertIsNone(catalog.spec_error(self.values("none")))
+
+    def test_a_list_without_none_is_still_fine(self):
+        self.assertIsNone(catalog.spec_error(self.values("ngram-mod,ngram-cache")))
 
 
 class TestAnchorCommands(unittest.TestCase):
@@ -323,9 +508,13 @@ class TestSpecErrorMessagesAreAscii(unittest.TestCase):
         self.assertIsNotNone(err)
         err.encode("cp1252")
 
-    def test_mtp_with_draft_model_message_is_ascii(self):
-        err = catalog.spec_error(
-            self.values(spec_type="draft-mtp", draft_model="d.gguf"))
+    def test_all_none_list_message_is_ascii(self):
+        err = catalog.spec_error(self.values(spec_type="none,none"))
+        self.assertIsNotNone(err)
+        err.encode("cp1252")
+
+    def test_wrong_typed_draft_model_message_is_ascii(self):
+        err = catalog.spec_error(self.values(draft_model=7))
         self.assertIsNotNone(err)
         err.encode("cp1252")
 
@@ -355,6 +544,302 @@ class TestMultiValueSpecType(unittest.TestCase):
         err = catalog.spec_error(self.values("ngram-mod,draft-dflash"))
         self.assertIsNotNone(err)
         self.assertIn("draft model", err)
+
+
+class TestAllNoneSpecList(unittest.TestCase):
+    """Typing "none,none" at the speculative row and pressing Enter used to kill
+    the launcher: parse_value accepted it, then spec_error took others[0] of an
+    empty list. Rejected at edit time now, and spec_error stays total for the
+    hand-edited config that never passed through parse_value."""
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def parse(self, text):
+        return catalog.parse_value(catalog.settings_by_key()["spec_type"], text)
+
+    def test_parse_rejects_a_list_that_is_only_none_repeated(self):
+        for text in ("none,none", "none,none,none", " none , none "):
+            with self.subTest(text=text):
+                ok, err = self.parse(text)
+                self.assertFalse(ok, f"{text!r} must be refused")
+                self.assertIn("none", err)
+                err.encode("cp1252")
+
+    def test_parse_rejects_none_mixed_with_a_real_type(self):
+        for text, other in (("none,draft-mtp", "draft-mtp"),
+                            ("ngram-mod,none", "ngram-mod")):
+            with self.subTest(text=text):
+                ok, err = self.parse(text)
+                self.assertFalse(ok, f"{text!r} must be refused")
+                self.assertIn(other, err)
+                err.encode("cp1252")
+
+    def test_parse_still_accepts_a_single_none_and_a_plain_list(self):
+        """Otherwise 'reject anything containing none' would pass the two tests
+        above and no config could switch speculative decoding off again."""
+        self.assertEqual(self.parse("none"), (True, "none"))
+        self.assertEqual(self.parse(""), (True, "none"))
+        self.assertEqual(self.parse("ngram-mod,ngram-cache"),
+                         (True, "ngram-mod,ngram-cache"))
+
+    def test_spec_error_reports_an_all_none_list_instead_of_raising(self):
+        for text in ("none,none", "none,none,none"):
+            with self.subTest(text=text):
+                err = catalog.spec_error(self.values(spec_type=text))
+                self.assertIsNotNone(err, f"{text!r} must be refused")
+                self.assertIn("none", err)
+                err.encode("cp1252")
+
+    def test_an_all_none_list_is_speculative_off(self):
+        """It means 'off', so it must not gate the spec keys ON - that emitted
+        --spec-* flags for a config that asked for no speculative decoding."""
+        v = self.values(spec_type="none,none")
+        for key in ("spec_type", "draft_model", "spec_ngl", "spec_n_max",
+                    "spec_n_min", "spec_p_min"):
+            self.assertNotIn(key, catalog.active_keys(v))
+        argv = catalog.build_argv(v, "m.gguf", "a")
+        self.assertFalse([x for x in argv if x.startswith("--spec")],
+                         f"no --spec flag may survive: {argv}")
+
+
+class TestSpecTypeIsEmittedNormalised(unittest.TestCase):
+    """Verified against build 10453: a hand-edited "ngram-mod, ngram-cache" was
+    emitted verbatim and the binary answered
+        unknown speculative type:  ngram-cache
+    - the space is part of the type name by the time it splits the token. What
+    spec_error validated (the stripped members) must be what is sent."""
+
+    def values(self, spec_type):
+        v = catalog.catalog_defaults()
+        v["spec_type"] = spec_type
+        return v
+
+    def test_spaces_around_members_are_stripped_before_emission(self):
+        for text in ("ngram-mod, ngram-cache", " ngram-mod ,ngram-cache",
+                     "ngram-mod ,  ngram-cache "):
+            with self.subTest(text=text):
+                v = self.values(text)
+                self.assertIsNone(catalog.spec_error(v))
+                argv = catalog.build_argv(v, "m.gguf", "a")
+                self.assertEqual(argv[argv.index("--spec-type") + 1],
+                                 "ngram-mod,ngram-cache")
+
+    def test_a_single_type_with_stray_spaces_is_stripped_too(self):
+        v = self.values(" draft-mtp ")
+        argv = catalog.build_argv(v, "m.gguf", "a")
+        self.assertEqual(argv[argv.index("--spec-type") + 1], "draft-mtp")
+
+    def test_emit_normalises_on_its_own(self):
+        setting = catalog.settings_by_key()["spec_type"]
+        self.assertEqual(catalog.emit(setting, "ngram-mod, ngram-cache"),
+                         ["--spec-type", "ngram-mod,ngram-cache"])
+
+
+class TestWrongTypedDraftModel(unittest.TestCase):
+    """Both launch and [c] do config.resolve_path(values["draft_model"], root)
+    whenever the value is truthy, and os.path.isabs(7) raises TypeError - a
+    traceback out of the board, from a hand-edited config, on Enter. Both call
+    spec_error first, so refusing here is what turns it into a message."""
+
+    BAD = (7, 1.5, ["d.gguf"], {"path": "d.gguf"}, True)
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def test_a_non_string_draft_model_is_refused_whatever_the_spec_type(self):
+        # Every spec type, because the caller reads draft_model unconditionally:
+        # a leftover number on a "none" config crashed it just as hard.
+        for spec_type in ("none", "draft-mtp", "ngram-mod", "draft-dflash"):
+            for bad in self.BAD:
+                with self.subTest(spec_type=spec_type, bad=bad):
+                    err = catalog.spec_error(
+                        self.values(spec_type=spec_type, draft_model=bad))
+                    self.assertIsNotNone(
+                        err, f"draft_model={bad!r} must be refused")
+                    self.assertIn("draft model", err)
+                    err.encode("cp1252")
+
+    def test_a_string_draft_model_and_an_unset_one_are_still_fine(self):
+        """Otherwise 'always refuse' passes the test above and no draft type
+        could launch at all."""
+        self.assertIsNone(catalog.spec_error(
+            self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf")))
+        self.assertIsNone(catalog.spec_error(self.values(spec_type="ngram-mod")))
+
+
+class TestBlankDraftModel(unittest.TestCase):
+    """'   ' is truthy in Python, so a draft-model row holding nothing but
+    spaces satisfied every `if values.get("draft_model")` in the launcher.
+    spec_error called it a valid path and let the launch through; resolve_path
+    then joined it onto the model root and the only thing the user was told was
+    "draft model is gone", naming a path made of spaces. Blank after strip is
+    absent, and absent is what the message for it already says."""
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    BLANK = ("   ", "", "\t", " \n ")
+
+    def test_a_whitespace_only_draft_model_is_not_a_draft_model(self):
+        for blank in self.BLANK:
+            with self.subTest(blank=blank):
+                err = catalog.spec_error(
+                    self.values(spec_type="draft-dflash", draft_model=blank))
+                self.assertIsNotNone(err, f"{blank!r} must not count as a path")
+                self.assertIn("needs a draft model", err)
+
+    def test_a_real_path_and_a_padded_one_are_still_accepted(self):
+        """Otherwise 'always refuse' passes the test above. A path with spaces
+        AROUND a real name is a real path - this machine's models live under
+        D:\\LLM Models - so only blank-after-strip is refused."""
+        for good in ("d/DFlash.gguf", "  d/DFlash.gguf  ", "D:\\LLM Models\\d.gguf"):
+            with self.subTest(good=good):
+                self.assertIsNone(catalog.spec_error(
+                    self.values(spec_type="draft-dflash", draft_model=good)))
+
+    def test_a_blank_draft_model_is_no_error_for_a_type_that_needs_none(self):
+        self.assertIsNone(catalog.spec_error(
+            self.values(spec_type="ngram-mod", draft_model="   ")))
+
+
+class TestSpecCarriesOwnHead(unittest.TestCase):
+    """The predicate behind the draft-model clearing on row 8. It must be true
+    only for a type the catalog RECOGNISES and that genuinely runs without a
+    separate draft GGUF - never for a typo, which the catalog knows nothing
+    about, and never for 'none', which means no speculative decoding at all."""
+
+    def values(self, spec_type):
+        v = catalog.catalog_defaults()
+        v["spec_type"] = spec_type
+        return v
+
+    def test_true_for_the_built_in_types(self):
+        for spec_type in ("draft-mtp", "ngram-simple", "ngram-mod",
+                          "ngram-cache", "ngram-mod,ngram-cache"):
+            with self.subTest(spec_type=spec_type):
+                self.assertTrue(
+                    catalog.spec_carries_own_head(self.values(spec_type)))
+
+    def test_false_for_an_unrecognised_or_typod_type(self):
+        for spec_type in ("ngram-modd", "draft-mtpp", "", "3",
+                          "ngram-mod,ngram-cach", "  "):
+            with self.subTest(spec_type=spec_type):
+                self.assertFalse(
+                    catalog.spec_carries_own_head(self.values(spec_type)),
+                    f"{spec_type!r} is not a type this catalog understands")
+
+    def test_false_for_none_and_for_types_that_want_a_draft_model(self):
+        for spec_type in ("none", "none,none", "none,ngram-mod", "draft-dflash",
+                          "draft-simple", "ngram-mod,draft-dflash"):
+            with self.subTest(spec_type=spec_type):
+                self.assertFalse(
+                    catalog.spec_carries_own_head(self.values(spec_type)))
+
+    def test_it_is_total_over_hand_edited_types(self):
+        for spec_type in (7, 1.5, None, ["ngram-mod"], {"a": 1}, True):
+            with self.subTest(spec_type=spec_type):
+                catalog.spec_carries_own_head(self.values(spec_type))
+
+
+class TestExtraArgsCanBeCleared(unittest.TestCase):
+    """Blank keeps the current value for every row, so "-" is the only way back
+    to an empty one. On this row "-" used to be stored literally and emitted as
+    a bare argument, which the binary rejects - the row could never be cleared."""
+
+    def parse(self, text):
+        return catalog.parse_value(catalog.settings_by_key()["extra"], text)
+
+    def test_a_dash_clears_the_row(self):
+        self.assertEqual(self.parse("-"), (True, ""))
+
+    def test_a_cleared_row_emits_nothing(self):
+        ok, value = self.parse("-")
+        self.assertTrue(ok)
+        setting = catalog.settings_by_key()["extra"]
+        self.assertEqual(catalog.emit(setting, value), [])
+        v = catalog.catalog_defaults()
+        v["extra"] = value
+        self.assertNotIn("-", catalog.build_argv(v, "m.gguf", "a"))
+
+    def test_a_cleared_row_still_renders_as_a_string(self):
+        """None would have worked for emission and then shown up on the board as
+        a wrong-typed value, since the raw renderer only accepts strings."""
+        self.assertIsInstance(self.parse("-")[1], str)
+
+    def test_real_extra_args_are_untouched(self):
+        self.assertEqual(self.parse("--props"), (True, "--props"))
+        self.assertEqual(self.parse('--alias "my model"'),
+                         (True, '--alias "my model"'))
+
+
+class TestStaleDraftModelDoesNotBlockBuiltInTypes(unittest.TestCase):
+    """A draft model the active spec type cannot use is not an error: active_keys
+    strips it from argv, so the flag cannot reach llama-server. Refusing blocked
+    a launch whose command line was already right, and named a row the board
+    hides for these very types."""
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def test_built_in_types_launch_with_a_stale_draft_model(self):
+        for spec_type in ("draft-mtp", "ngram-mod", "ngram-cache",
+                          "ngram-mod,ngram-cache"):
+            with self.subTest(spec_type=spec_type):
+                v = self.values(spec_type=spec_type, draft_model="d/old.gguf")
+                self.assertIsNone(catalog.spec_error(v),
+                                  f"{spec_type} must launch anyway")
+                argv = catalog.build_argv(v, "m.gguf", "a")
+                self.assertNotIn("--spec-draft-model", argv)
+                self.assertNotIn("d/old.gguf", argv)
+
+    def test_a_draft_type_in_the_list_still_uses_the_draft_model(self):
+        """Not refusing must not become 'never emit it': mixed with a type that
+        does need a draft GGUF, the model is used and the flag is sent."""
+        v = self.values(spec_type="draft-mtp,draft-dflash",
+                        draft_model="d/DFlash.gguf")
+        self.assertIsNone(catalog.spec_error(v))
+        argv = catalog.build_argv(v, "m.gguf", "a", draft_path="D:\\d\\DFlash.gguf")
+        self.assertIn("--spec-draft-model", argv)
+        self.assertEqual(argv[argv.index("--spec-draft-model") + 1],
+                         "D:\\d\\DFlash.gguf")
+
+    def test_a_missing_draft_model_is_still_refused(self):
+        err = catalog.spec_error(self.values(spec_type="draft-dflash"))
+        self.assertIsNotNone(err)
+        self.assertIn("draft model", err)
+
+
+class TestSpecErrorIsTotal(unittest.TestCase):
+    """spec_error gates both [Enter] and [c]. Raising takes down the only screen
+    the offending value can be repaired from, so it must return a string or None
+    for anything a hand edit can put in the file."""
+
+    def test_no_values_dict_makes_it_raise(self):
+        bad_values = [5, 1.5, "none,none", ["draft-mtp"], {"a": 1}, True, None,
+                      "", "none", "none,draft-mtp", " , , ", "draft-mtp,",
+                      "NONE,none"]
+        for spec in bad_values:
+            for draft in (None, "", "d.gguf", 7, ["d.gguf"], {"p": 1}, True):
+                with self.subTest(spec_type=spec, draft_model=draft):
+                    v = catalog.catalog_defaults()
+                    v["spec_type"] = spec
+                    v["draft_model"] = draft
+                    err = catalog.spec_error(v)      # must not raise
+                    if err is not None:
+                        self.assertIsInstance(err, str)
+                        err.encode("cp1252")
+
+    def test_an_empty_values_dict_is_survivable(self):
+        self.assertIsNone(catalog.spec_error({}))
 
 
 if __name__ == "__main__":
