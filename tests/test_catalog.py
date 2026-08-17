@@ -18,6 +18,17 @@ class TestCatalogShape(unittest.TestCase):
         keys = {s.key for g in catalog.GROUPS for s in g.settings}
         self.assertEqual(set(catalog.catalog_defaults()), keys)
 
+    def test_mutable_defaults_are_not_shared_between_calls(self):
+        """chat_template_kwargs defaults to a dict. If every caller received the
+        same object, one caller mutating it in place would poison the catalog
+        default for the entire process, and every config built afterwards would
+        silently inherit the change."""
+        a = catalog.catalog_defaults()
+        b = catalog.catalog_defaults()
+        self.assertIsNot(a["chat_template_kwargs"], b["chat_template_kwargs"])
+        a["chat_template_kwargs"]["leaked"] = True
+        self.assertEqual(catalog.catalog_defaults()["chat_template_kwargs"], {})
+
 
 class TestParseValue(unittest.TestCase):
     def parse(self, key, text):

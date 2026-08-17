@@ -3,6 +3,7 @@
 Pinned to llama.cpp build 10453 (commit 3cb7ffb1a). If the binary is rebuilt and
 its allowed values change, update CACHE_TYPES / SPEC_TYPES below.
 """
+import copy
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -96,7 +97,7 @@ def settings_by_key():
 
 
 def catalog_defaults():
-    return {s.key: s.default for g in GROUPS for s in g.settings}
+    return copy.deepcopy({s.key: s.default for g in GROUPS for s in g.settings})
 
 
 def _range_error(setting, value):

@@ -143,10 +143,20 @@ def diff_from_defaults(data, values):
     return {k: v for k, v in values.items() if k in base and v != base[k]}
 
 
+def _temp_path(path):
+    """Scratch path for an atomic save.
+
+    Same directory as the target, because os.replace is only atomic within one
+    volume. Process-qualified, because two launcher instances saving at once
+    would otherwise race on one filename and the loser would fail with a
+    PermissionError it could not explain."""
+    folder = os.path.dirname(os.path.abspath(path))
+    return os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+
+
 def save(path, data):
     """Write atomically: a crash mid-write must not truncate the config file."""
-    folder = os.path.dirname(os.path.abspath(path))
-    tmp = os.path.join(folder, f".{os.path.basename(path)}.tmp")
+    tmp = _temp_path(path)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
