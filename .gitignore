@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Subagent-driven-development scratch: ledger, briefs, review packages.
+# Regenerable; the git history is the real record.
+.sdd/
