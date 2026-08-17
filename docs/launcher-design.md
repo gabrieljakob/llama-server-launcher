@@ -129,12 +129,21 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
 | 4 sampling | `temp`, `top_k`, `top_p`, `min_p` | `--temp`, `--top-k`, `--top-p`, `--min-p` | float ≥ 0, int ≥ 0, float 0–1, float 0–1 | 0.6, 20, 0.95, 0.0 |
 | 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | **all unset** |
-| 6 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
-| 7 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
-| 8 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
-| 9 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
-| 10 template | `chat_template_kwargs` | `--chat-template-kwargs` | JSON object | `{}` |
-| 11 extra args | `extra` | *(verbatim)* | str | `""` |
+| 6 reasoning | `reasoning`, `reasoning_effort`, `reasoning_preserve`, `reasoning_budget` | `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--reasoning-budget` | choice, choice, tri, int ≥ -1 | `auto`, `default`, unset, unset |
+| 7 toggles | `jinja`, `no_mmproj`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `--metrics`, `-fa`, `-kvu` | bool, bool, bool, choice, tri | true, true, false, `on`, unset |
+| 8 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
+| 9 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
+| 10 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
+| 11 template | `chat_template_kwargs` | `--chat-template-kwargs` | JSON object | `{}` |
+| 12 extra args | `extra` | *(verbatim)* | str | `""` |
+
+**The reasoning settings are their own row**, split out of toggles on 2026-08-17 when
+`reasoning_budget` was added. Same argument as the penalties row: eight values on one line
+stops being readable, and these four are one concept. Discoverability was the trigger —
+build 10453 announces at startup that a model's template advertises
+`supports_preserve_reasoning`, and the flag it is pointing at was in the catalog and
+editable but invisible on the board (see the tri-state rendering note below), so the
+apparent way to act on that log line was hand-editing row 11's template kwargs.
 
 **The penalties row defaults to unset**, not to llama-server's values (`0.0 / 0.0 / 1.0 /
 64`). Pre-filling them would put numbers on the board that nobody chose, and someone
@@ -161,6 +170,17 @@ that flag. `draft_model` is the other one.
   respectively. `--kv-unified` and `--reasoning-preserve` both default to a value the
   binary decides (slot count and chat template respectively), so "unset" must stay
   distinct from "off" — a plain bool would silently override the binary's choice.
+- `reasoning_budget` is `int ≥ -1`, not `int ≥ 0`: `-1` is unrestricted, `0` ends thinking
+  immediately and `N > 0` is a token budget, so `-1` is the smallest value the flag has a
+  meaning for. Build 10453 accepts `-2` without complaint, which would leave a typo to be
+  discovered as strange model behaviour instead of as a message on the row it came from.
+  The board renders `-1` as `budget unrestricted`, the same courtesy `-np -1` gets as
+  `auto` — display only, emission still sends the number.
+- **An unset setting renders as `label -`, for every type including tri.** Tri-states used
+  to render as nothing at all, reasoned as "`off` would claim we pass `--no-flag` when we
+  pass nothing". True of `off` and not of `-`, and the cost was the whole setting:
+  `reasoning_preserve` shipped catalogued, editable and emitting, and the board never once
+  said it existed. A setting the user cannot see is a setting the user cannot use.
 
 ### Emission rules
 
@@ -185,7 +205,7 @@ differently and a single rule cannot cover them:
 
 | `spec_type` | Draft model | Emits |
 |---|---|---|
-| `none` | — | nothing from row 8 |
+| `none` | — | nothing from row 10 |
 | `draft-simple`, `draft-eagle3`, `draft-dflash`, `draft-dspark` | **required** | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, plus shared knobs |
 | `draft-mtp` | **must not be set** — MTP is built into the model | `--spec-type`, plus shared knobs |
 | `ngram-*` (5 types) | not used | `--spec-type`, plus shared knobs; family-specific `--spec-ngram-*` flags via extra-args |
@@ -298,7 +318,7 @@ Scanning still walks `model_root` for `*.gguf` (skipping `mmproj*`), but scanned
 appear **only** under `[n]` and the speculative-row draft picker — never as menu entries. This is
 what stops draft models masquerading as launchable models.
 
-Row 9 edits `spec_type` first, then adapts: a `draft-*` type opens the `.gguf` picker for
+Row 10 edits `spec_type` first, then adapts: a `draft-*` type opens the `.gguf` picker for
 `draft_model` and prompts `spec_ngl`; `draft-mtp` and the `ngram-*` types skip straight to
 the shared knobs; `none` skips the rest entirely. The template row accepts a JSON object and
 re-prompts on a parse error, so a malformed template kwarg is caught at edit time rather
@@ -315,18 +335,19 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   3  host:port    127.0.0.1:8080
   4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
   5  penalties    presence 0.0  frequency -  repeat -  repeat-last-n -
-  6  toggles      jinja on  no-mmproj on  reasoning auto  effort xhigh  fa on  kv-unified on
-  7  kv cache     K f16 / V f16
-  8  batching     -np auto  -b 2048  -ub 512
-* 9  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
- 10  template     preserve_thinking=true
- 11  extra args   (none)
+  6  reasoning    reasoning auto  effort xhigh  preserve -  budget -
+  7  toggles      jinja on  no-mmproj on  metrics off  fa on  kv-unified on
+  8  kv cache     K f16 / V f16
+  9  batching     -np auto  -b 2048  -ub 512
+*10  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
+ 11  template     preserve_thinking=true
+ 12  extra args   (none)
 
-  [1-11] edit   [s] save   [c] show command   [Enter] launch   [q] back
+  [1-12] edit   [s] save   [c] show command   [Enter] launch   [q] back
 ```
 
 - `*` marks rows edited but not yet saved.
-- Row 9 shows every shared knob (`n-max`, `n-min`, `p-min`), and additionally `draft ngl`
+- Row 10 shows every shared knob (`n-max`, `n-min`, `p-min`), and additionally `draft ngl`
   when the spec type takes a separate draft model. An earlier draft of this mockup omitted
   `n-min`, contradicting §5 which lists it as a real setting: a setting the user can edit
   must be one the user can see, so the mockup was wrong, not the board.
@@ -432,7 +453,7 @@ Around it:
   tri-state `reasoning_preserve` toggle is the second lever to try.
 - **The `ngram-*` speculative families need 12 further flags** to be usable beyond their
   defaults. They are reachable through extra-args today. If one turns out to be worth
-  using regularly, it becomes a conditional sub-group under row 8.
+  using regularly, it becomes a conditional sub-group under row 10.
 - **The `"it"` substring heuristic** in the current `infer_flags_from_name` matches the
   `it` inside `ornith`. The heuristic disappears with this refactor: new configs start
   from catalog and file defaults rather than guesses parsed out of filenames.

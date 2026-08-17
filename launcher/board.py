@@ -16,21 +16,39 @@ def _bad(label, value):
     return f"{label} !bad {value}"
 
 
+# Values that llama-server spells as a number and means as a word. Display
+# only - emit() still sends the number. gpu_layers already shows "auto" because
+# its default IS the string "auto", and a board that prints "auto" on one row
+# and "-1" on another for the same idea is leaking an implementation detail.
+_SENTINELS = {
+    ("parallel", -1): "auto",                  # choose a slot count for me
+    ("reasoning_budget", -1): "unrestricted",  # no limit on thinking tokens
+}
+
+
 def _fmt(setting, value):
     if value is None:
-        # A tri-state vanishes when unset: showing "off" would claim we pass
-        # --no-flag when we pass nothing at all. A valued setting instead shows
-        # a dash, so the row still tells the user the setting exists while being
-        # honest that WE are not setting it - llama-server's own default applies.
-        # The dash is also what you type to put one back.
-        return None if setting.type == "tri" else f"{setting.label} -"
-    if setting.key == "parallel" and value == -1:
-        # -1 is llama-server's sentinel for "choose a slot count for me". Show
-        # what it means, not the sentinel: gpu_layers already displays "auto"
-        # because its default IS the string "auto", and a board that prints
-        # "auto" on one row and "-1" on another for the same concept is just
-        # leaking an implementation detail. Display only - emit() still sends -1.
-        return f"{setting.label} auto"
+        # A dash, for EVERY type including tri. The row still tells the user the
+        # setting exists while being honest that WE are not setting it -
+        # llama-server's own default applies - and the dash is what you type to
+        # put one back.
+        #
+        # Tri-states used to vanish here instead, on the grounds that "off"
+        # would claim we pass --no-flag when we pass nothing at all. That much
+        # is true of "off" and not of "-", and the cost of vanishing was the
+        # whole setting: reasoning_preserve was in the catalog, editable, and
+        # emitting - and the board never once mentioned it, so preserving
+        # thinking looked like a job for a hand-written template kwarg.
+        return f"{setting.label} -"
+    # Guarded by isinstance rather than looked up directly: a hand-edited config
+    # can put a list or a dict on any key, and hashing one inside this tuple
+    # raises TypeError - from the render, which is the one screen the bad value
+    # could be repaired from. bool is excluded because True == 1 in Python, so a
+    # toggle must never borrow a number's word for itself.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        sentinel = _SENTINELS.get((setting.key, value))
+        if sentinel:
+            return f"{setting.label} {sentinel}"
     if setting.type == "bool":
         return f"{setting.label} {'on' if value else 'off'}"
     if setting.type == "tri":
@@ -407,7 +425,7 @@ def edit_group(group, values, ask, say):
     # differ on exactly the case this row exists to repair: active_keys drops
     # draft_model for any type that is not a known draft-* type, an UNKNOWN one
     # included, so a hand-edited "ngram-modd" took this branch. spec_error sends
-    # the user to row 8 to fix that typo; pressing Enter through the row - blank
+    # the user to row 10 to fix that typo; pressing Enter through the row - blank
     # keeps, so the typo is still there - then deleted their draft model and
     # told them "ngram-modd carries its own", which is not true of a string the
     # catalog cannot interpret at all. The row was marked dirty afterwards, so

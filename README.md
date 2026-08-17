@@ -40,20 +40,21 @@ Model: Qwen3.8-27B-UD-Q3_K_XL.gguf   |  CUDA0: NVIDIA GeForce RTX 4080 (16375 Mi
   3  host:port    127.0.0.1:8080
   4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
   5  penalties    presence -  frequency -  repeat -  repeat-last-n -
-  6  toggles      jinja on  no-mmproj on  reasoning on  effort xhigh  fa on  kv-unified on
-  7  kv cache     K f16 / V f16
-  8  batching     -np auto  -b 2048  -ub 512
-  9  speculative  draft-mtp  draft ngl auto  n-max 3  n-min 0  p-min 0.75
- 10  template     preserve_thinking=true
- 11  extra args   (none)
+  6  reasoning    reasoning on  effort xhigh  preserve -  budget -
+  7  toggles      jinja on  no-mmproj on  metrics off  fa on  kv-unified on
+  8  kv cache     K f16 / V f16
+  9  batching     -np auto  -b 2048  -ub 512
+ 10  speculative  draft-mtp  draft ngl auto  n-max 3  n-min 0  p-min 0.75
+ 11  template     preserve_thinking=true
+ 12  extra args   (none)
 
-  [1-11] edit   [s] save   [c] show command   [Enter] launch   [q] back
+  [1-12] edit   [s] save   [c] show command   [Enter] launch   [q] back
 ```
 
 ## Contents
 
 - [Highlights](#highlights) · [Requirements](#requirements) · [Quick start](#quick-start)
-- [The board](#the-board) · [Configuration](#configuration) · [Speculative decoding](#speculative-decoding)
+- [The board](#the-board) · [Configuration](#configuration) · [Reasoning](#reasoning) · [Speculative decoding](#speculative-decoding)
 - [Launching](#launching) · [Tests](#tests) · [Layout](#layout)
 - [Porting](#porting) · [Windows and locale notes](#windows-and-locale-notes)
 
@@ -113,7 +114,7 @@ Then press <kbd>n</kbd> to build a config from any `.gguf` it finds.
 
 | Key | Does |
 |:---:|---|
-| <kbd>1</kbd>–<kbd>11</kbd> | Edit that row. Blank keeps the current value; `-` clears a setting back to llama-server's own default |
+| <kbd>1</kbd>–<kbd>12</kbd> | Edit that row. Blank keeps the current value; `-` clears a setting back to llama-server's own default |
 | <kbd>s</kbd> | Save — writes only the values that differ from the defaults, so the `defaults` block stays live |
 | <kbd>c</kbd> | Print the equivalent command line, quoted so it can be pasted into PowerShell |
 | <kbd>Enter</kbd> | Launch |
@@ -126,6 +127,10 @@ Settings shown as `-` are **not passed at all** — llama-server applies its own
 deliberate: pre-filling `repeat 1.0` and `frequency 0.0` would put numbers on screen that nobody
 chose, and they are not even uniform (`0.0` disables presence and frequency, but `1.0` is what
 disables repeat).
+
+Every setting shows, dash and all. A flag we are not passing used to render as nothing, which
+turned out to hide the setting from the one screen it can be changed from — `preserve` sat in the
+catalog, editable and working, while the board never mentioned it existed.
 
 ## Configuration
 
@@ -167,6 +172,28 @@ plus `os.replace` — so an interrupted write cannot leave you with a truncated 
 
 > **One model, several configs.** `gemma4` and `gemma4dflash` above point at the same weights with
 > different flags. That is the whole point of naming configs rather than listing models.
+
+## Reasoning
+
+Row 6 carries all four `--reasoning*` flags, because they are one concept and the toggles row was
+already the widest on the board:
+
+| Shown | Flag | Unset means |
+|---|---|---|
+| `reasoning on \| off \| auto` | `--reasoning` | — (`auto` detects from the template) |
+| `effort <level>` | `--reasoning-effort` | — (`default` keeps the template's own) |
+| `preserve on \| off \| -` | `--reasoning-preserve` / `--no-reasoning-preserve` | the template decides |
+| `budget <n> \| -` | `--reasoning-budget` | unrestricted (`-1`); `0` ends thinking immediately |
+
+`preserve` is the one to reach for when llama-server announces at startup that the model's template
+advertises the `supports_preserve_reasoning` capability — it keeps the reasoning trace for the whole
+history rather than the last assistant message only. It is a **server-level** setting and only bites
+on templates that advertise that capability.
+
+`chat_template_kwargs.preserve_thinking` on row 11 is a *different* lever: that one is passed
+through to the jinja template itself. The `qwen3.8-preserve-thinking-coding` config uses the kwarg.
+If thinking still is not preserved in practice, `preserve on` is the second lever to try — the two
+are not alternatives so much as two places the same wish can be expressed.
 
 ## Speculative decoding
 

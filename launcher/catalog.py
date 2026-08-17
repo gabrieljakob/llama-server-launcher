@@ -96,13 +96,30 @@ GROUPS = [
         # llama.cpp builds where -1 meant "the whole context".
         Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", None, lo=0),
     ]),
-    Group("toggles", "toggles", [
-        Setting("jinja", "--jinja", "jinja", "bool", True),
-        Setting("no_mmproj", "--no-mmproj", "no-mmproj", "bool", True),
+    # Their own row rather than four more fields on toggles, for the reason the
+    # penalties row exists: eight values on one line stops being readable, and
+    # these four are one concept. It is also the row a model's own startup log
+    # sends people to - build 10453 announces a template with the
+    # 'supports_preserve_reasoning' capability - and a lever nobody can find on
+    # the board is a lever nobody uses. `preserve` and `budget` are BOTH unset
+    # by default: llama-server's answer is the template's own default and -1
+    # (unrestricted), and neither is ours to assume.
+    Group("reasoning", "reasoning", [
         Setting("reasoning", "--reasoning", "reasoning", "choice", "auto", ONOFFAUTO),
         Setting("reasoning_effort", "--reasoning-effort", "effort", "choice",
                 "default", REASONING_EFFORTS),
-        Setting("reasoning_preserve", "--reasoning-preserve", "reason-preserve", "tri", None),
+        Setting("reasoning_preserve", "--reasoning-preserve", "preserve", "tri", None),
+        # lo=-1 and not lo=0: -1 is unrestricted, 0 ends thinking immediately,
+        # N>0 is a token budget - so -1 is the smallest value the flag has a
+        # meaning for. Build 10453 accepts -2 without a word, which leaves a
+        # typo to be discovered as strange model behaviour rather than as a
+        # message on the row it came from.
+        Setting("reasoning_budget", "--reasoning-budget", "budget", "int", None,
+                lo=-1),
+    ]),
+    Group("toggles", "toggles", [
+        Setting("jinja", "--jinja", "jinja", "bool", True),
+        Setting("no_mmproj", "--no-mmproj", "no-mmproj", "bool", True),
         Setting("metrics", "--metrics", "metrics", "bool", False),
         Setting("flash_attn", "--flash-attn", "fa", "choice", "on", ONOFFAUTO),
         Setting("kv_unified", "--kv-unified", "kv-unified", "tri", None),
@@ -529,7 +546,7 @@ def active_keys(values):
 
 def editable_keys(values):
     """Which setting keys the board prompts for. Same gating as emission, except
-    spec_type is always editable - otherwise row 8 could never be switched on,
+    spec_type is always editable - otherwise row 10 could never be switched on,
     since 'none' is the default and 'none' removes itself from active_keys."""
     return active_keys(values) | {"spec_type"}
 

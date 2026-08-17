@@ -7,9 +7,20 @@ class TestCatalogShape(unittest.TestCase):
         labels = [g.label for g in catalog.GROUPS]
         self.assertEqual(labels, [
             "context", "gpu layers", "host:port", "sampling", "penalties",
-            "toggles", "kv cache", "batching", "speculative", "template",
-            "extra args",
+            "reasoning", "toggles", "kv cache", "batching", "speculative",
+            "template", "extra args",
         ])
+
+    def test_the_reasoning_row_holds_every_reasoning_lever(self):
+        """All four --reasoning* flags on one row, and none of them left behind
+        on toggles. They are one concept, and the toggles row was already the
+        widest on the board before it had to carry a budget as well."""
+        by_group = {g.key: [s.key for s in g.settings] for g in catalog.GROUPS}
+        self.assertEqual(by_group["reasoning"],
+                         ["reasoning", "reasoning_effort", "reasoning_preserve",
+                          "reasoning_budget"])
+        for key in by_group["reasoning"]:
+            self.assertNotIn(key, by_group["toggles"])
 
     def test_every_setting_key_is_unique(self):
         keys = [s.key for g in catalog.GROUPS for s in g.settings]
@@ -196,6 +207,23 @@ class TestParseValue(unittest.TestCase):
         self.assertEqual(self.parse("jinja", "y"), (True, True))
         self.assertEqual(self.parse("jinja", "n"), (True, False))
 
+    def test_reasoning_budget_accepts_the_three_documented_shapes(self):
+        """-1 unrestricted, 0 ends thinking immediately, N>0 is a token budget.
+        '-' puts the row back to unset, where we pass no flag at all."""
+        self.assertEqual(self.parse("reasoning_budget", "-1"), (True, -1))
+        self.assertEqual(self.parse("reasoning_budget", "0"), (True, 0))
+        self.assertEqual(self.parse("reasoning_budget", "512"), (True, 512))
+        self.assertEqual(self.parse("reasoning_budget", "-"), (True, None))
+
+    def test_reasoning_budget_rejects_below_unrestricted(self):
+        """-1 is the smallest thing the flag means. Build 10453 takes -2 without
+        a word, so nothing downstream would tell the user their budget was
+        nonsense - it has to be refused where the row can still be fixed."""
+        ok, err = self.parse("reasoning_budget", "-2")
+        self.assertFalse(ok)
+        self.assertEqual(err, "must be at least -1")
+        err.encode("cp1252")
+
     def test_spec_type_accepts_comma_separated_list(self):
         self.assertEqual(self.parse("spec_type", "draft-mtp"), (True, "draft-mtp"))
         ok, _ = self.parse("spec_type", "ngram-mod,ngram-cache")
@@ -274,12 +302,19 @@ class TestEmit(unittest.TestCase):
         self.assertEqual(self.emit("extra", '--props --alias "my model"'),
                          ["--props", "--alias", "my model"])
 
+    def test_reasoning_budget_emits_flag_and_value(self):
+        self.assertEqual(self.emit("reasoning_budget", -1),
+                         ["--reasoning-budget", "-1"])
+        self.assertEqual(self.emit("reasoning_budget", 0),
+                         ["--reasoning-budget", "0"])
+
     def test_an_unset_server_default_emits_nothing(self):
         """Settings with None default are not passed; they let llama-server use
         its own defaults."""
         self.assertEqual(self.emit("presence_penalty", None), [])
         self.assertEqual(self.emit("repeat_penalty", None), [])
         self.assertEqual(self.emit("repeat_last_n", None), [])
+        self.assertEqual(self.emit("reasoning_budget", None), [])
 
 
 class TestSpecGating(unittest.TestCase):
@@ -354,7 +389,7 @@ class TestSpecGating(unittest.TestCase):
                 self.assertIsNone(catalog.spec_error(ok))
 
     def test_none_drops_spec_type_from_emission_but_not_from_editing(self):
-        """The two key sets differ by exactly this one key. Without it, row 8
+        """The two key sets differ by exactly this one key. Without it, row 10
         would be unreachable: 'none' is the default, so nothing could ever
         switch it on."""
         v = self.values(spec_type="none")
@@ -720,7 +755,7 @@ class TestBlankDraftModel(unittest.TestCase):
 
 
 class TestSpecCarriesOwnHead(unittest.TestCase):
-    """The predicate behind the draft-model clearing on row 8. It must be true
+    """The predicate behind the draft-model clearing on row 10. It must be true
     only for a type the catalog RECOGNISES and that genuinely runs without a
     separate draft GGUF - never for a typo, which the catalog knows nothing
     about, and never for 'none', which means no speculative decoding at all."""

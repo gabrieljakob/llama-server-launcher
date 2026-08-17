@@ -45,9 +45,35 @@ class TestRenderGroup(unittest.TestCase):
         self.assertIn("jinja on", text)
         self.assertIn("metrics off", text)
 
-    def test_unset_tri_is_not_shown(self):
+    def test_unset_tri_shows_a_dash(self):
+        """It used to render as nothing at all, and that hid the setting from
+        the only screen it can be changed from: --reasoning-preserve was in the
+        catalog for weeks while the board never once mentioned it, so the way to
+        preserve thinking looked like hand-editing the template kwargs row.
+
+        'off' would be a lie - we pass no flag, not --no-kv-unified - but the
+        dash is exactly what the unset penalties already say, and it is also
+        what you type to put one back."""
         text = board.render_group(self.group("toggles"), self.values(kv_unified=None))
-        self.assertNotIn("kv-unified", text)
+        self.assertIn("kv-unified -", text)
+
+    def test_reasoning_row_shows_every_lever_at_its_default(self):
+        text = board.render_group(self.group("reasoning"), self.values())
+        for token in ("reasoning auto", "effort default", "preserve -", "budget -"):
+            self.assertIn(token, text)
+
+    def test_unrestricted_reasoning_budget_is_not_shown_as_a_sentinel(self):
+        """-1 is llama-server's spelling of 'no limit', the same way -1 is its
+        spelling of 'pick a slot count' on -np. The board says what it means."""
+        text = board.render_group(self.group("reasoning"),
+                                  self.values(reasoning_budget=-1))
+        self.assertIn("budget unrestricted", text)
+        self.assertNotIn("-1", text)
+
+    def test_a_real_reasoning_budget_shows_its_number(self):
+        text = board.render_group(self.group("reasoning"),
+                                  self.values(reasoning_budget=2048))
+        self.assertIn("budget 2048", text)
 
     def test_spec_none_renders_as_exactly_none(self):
         """assertEqual, not assertIn: the generic label formatter would emit
@@ -750,20 +776,23 @@ class TestEditGroup(unittest.TestCase):
         destroyed a saved kv_unified - while the prompt showed [on], promising
         the opposite."""
         values = self.values(kv_unified="on", reasoning_preserve="off")
-        out = board.edit_group(self.group("toggles"), values,
-                               lambda prompt: "", lambda t: None)
-        self.assertEqual(out["kv_unified"], "on")
-        self.assertEqual(out["reasoning_preserve"], "off")
+        for row in ("toggles", "reasoning"):
+            with self.subTest(row=row):
+                out = board.edit_group(self.group(row), values,
+                                       lambda prompt: "", lambda t: None)
+                self.assertEqual(out["kv_unified"], "on")
+                self.assertEqual(out["reasoning_preserve"], "off")
 
     def test_a_tri_is_cleared_with_a_dash(self):
-        answers = iter(["", "", "", "", "-", "", "", ""])
-        out = board.edit_group(self.group("toggles"),
-                               self.values(reasoning_preserve="on"),
-                               lambda prompt: next(answers), lambda t: None)
+        """Answered by prompt rather than by position: which row a setting sits
+        on is a layout decision, and this test is about the dash."""
+        out = board.edit_group(
+            self.group("reasoning"), self.values(reasoning_preserve="on"),
+            lambda prompt: "-" if "preserve" in prompt else "", lambda t: None)
         self.assertIsNone(out["reasoning_preserve"])
 
     def test_spec_type_is_always_editable_from_none(self):
-        """Regression: row 8 must be reachable. 'none' is the default, and if the
+        """Regression: row 10 must be reachable. 'none' is the default, and if the
         prompt loop used emission gating it would skip spec_type itself, leaving
         no path from 'none' to any speculative mode."""
         asked = []
