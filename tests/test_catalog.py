@@ -262,5 +262,54 @@ class TestAnchorCommands(unittest.TestCase):
         self.assertNotIn("--spec-draft-model", argv)
 
 
+class TestSpecErrorMessagesAreAscii(unittest.TestCase):
+    """parse_value's messages are guarded in TestParseValue. spec_error's are the
+    other user-facing strings this module produces, and they reach print() the same
+    way. A non-ASCII character here crashes the launcher on this cp1252 console."""
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def test_missing_draft_model_message_is_ascii(self):
+        err = catalog.spec_error(self.values(spec_type="draft-dflash"))
+        self.assertIsNotNone(err)
+        err.encode("cp1252")
+
+    def test_mtp_with_draft_model_message_is_ascii(self):
+        err = catalog.spec_error(
+            self.values(spec_type="draft-mtp", draft_model="d.gguf"))
+        self.assertIsNotNone(err)
+        err.encode("cp1252")
+
+
+class TestMultiValueSpecType(unittest.TestCase):
+    """--spec-type takes a comma-separated LIST. Verified against build 10453:
+    `--spec-type ngram-mod,ngram-cache` parses (it fails only on the model),
+    while `--spec-type not-a-real-type` is rejected at argument-parse time with
+    "unknown speculative type". So the pair must reach the binary as ONE token."""
+
+    def values(self, spec_type):
+        v = catalog.catalog_defaults()
+        v["spec_type"] = spec_type
+        return v
+
+    def test_comma_separated_types_emit_as_one_token(self):
+        argv = catalog.build_argv(self.values("ngram-mod,ngram-cache"), "m.gguf", "a")
+        self.assertEqual(argv[argv.index("--spec-type") + 1], "ngram-mod,ngram-cache")
+
+    def test_multi_value_gating_needs_no_draft_model(self):
+        v = self.values("ngram-mod,ngram-cache")
+        self.assertIsNone(catalog.spec_error(v))
+        self.assertNotIn("--spec-draft-model", catalog.build_argv(v, "m.gguf", "a"))
+
+    def test_a_draft_type_mixed_into_the_list_still_requires_a_model(self):
+        """The list form must not be a hole in the gating."""
+        err = catalog.spec_error(self.values("ngram-mod,draft-dflash"))
+        self.assertIsNotNone(err)
+        self.assertIn("draft model", err)
+
+
 if __name__ == "__main__":
     unittest.main()
