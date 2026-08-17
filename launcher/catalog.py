@@ -62,14 +62,22 @@ GROUPS = [
     ]),
     # Their own row rather than four more fields on sampling: eight values on one
     # line stops being readable, and these four are one concept.
+    #
+    # All four default to None, meaning "we do not pass this flag; llama-server
+    # uses its own default". That is deliberate. Pre-filling them with the
+    # server's defaults (0.0 / 0.0 / 1.0 / 64) would put numbers on the board
+    # that nobody chose, and a user who does not know these samplers cannot tell
+    # a default apart from a decision. Worse, the pairing is not even uniform -
+    # 0.0 disables presence and frequency, but 1.0 is what disables repeat - so
+    # the pre-filled row would actively mislead. Unset renders as "-" and emits
+    # nothing; a value appears only once someone sets one.
     Group("penalties", "penalties", [
-        Setting("presence_penalty", "--presence-penalty", "presence", "float", 0.0),
-        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", 0.0),
-        # 1.0 disables. Not 0.0 - this one is a multiplier, unlike its neighbours.
-        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", 1.0, lo=0),
+        Setting("presence_penalty", "--presence-penalty", "presence", "float", None),
+        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", None),
+        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", None, lo=0),
         # lo=0 because 0 disables and the binary REJECTS -1, unlike some older
         # llama.cpp builds where -1 meant "the whole context".
-        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", 64, lo=0),
+        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", None, lo=0),
     ]),
     Group("toggles", "toggles", [
         Setting("jinja", "--jinja", "jinja", "bool", True),
@@ -134,6 +142,13 @@ def parse_value(setting, text):
     """Parse user input for one setting. Returns (True, value) or (False, error)."""
     text = (text or "").strip()
     t = setting.type
+
+    # A setting whose catalog default is None means "we do not pass this flag".
+    # "-" puts it back there. Without an explicit way to unset, a value could be
+    # set once and never cleared - the same dead end that stranded draft_model,
+    # where the launcher refused to start and named a row the UI would not offer.
+    if text == "-" and setting.default is None and t not in ("tri", "bool"):
+        return True, None
 
     if t == "tri":
         if text == "":

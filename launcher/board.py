@@ -7,7 +7,12 @@ from . import catalog
 
 def _fmt(setting, value):
     if value is None:
-        return None
+        # A tri-state vanishes when unset: showing "off" would claim we pass
+        # --no-flag when we pass nothing at all. A valued setting instead shows
+        # a dash, so the row still tells the user the setting exists while being
+        # honest that WE are not setting it - llama-server's own default applies.
+        # The dash is also what you type to put one back.
+        return None if setting.type == "tri" else f"{setting.label} -"
     if setting.key == "parallel" and value == -1:
         # -1 is llama-server's sentinel for "choose a slot count for me". Show
         # what it means, not the sentinel: gpu_layers already displays "auto"
@@ -111,7 +116,9 @@ def _prompt_for(setting, current):
         hint = "  (on / off / blank = leave to llama-server)"
     elif setting.type == "bool":
         hint = "  (y/n)"
-    shown = "" if current is None else current
+    if setting.default is None and setting.type not in ("tri", "bool"):
+        hint += "  (- for the llama-server default)"
+    shown = "-" if current is None else current
     if setting.type == "json" and isinstance(current, dict):
         shown = json.dumps(current) if current else ""
     return f"  {setting.label}{hint} [{shown}]: "

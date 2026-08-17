@@ -95,6 +95,20 @@ class TestParseValue(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("xhigh", err)
 
+    def test_a_server_default_setting_can_be_set_and_unset(self):
+        """Settings whose catalog default is None are ones we simply do not pass.
+        They must be resettable, or a value set once could never be cleared."""
+        self.assertEqual(self.parse("repeat_penalty", "1.1"), (True, 1.1))
+        self.assertEqual(self.parse("repeat_penalty", "-"), (True, None))
+        self.assertEqual(self.parse("repeat_last_n", "-"), (True, None))
+        self.assertEqual(self.parse("frequency_penalty", "-"), (True, None))
+
+    def test_dash_is_not_a_magic_value_for_settings_that_have_a_default(self):
+        """temp has a real catalog default, so "-" there is just bad input."""
+        ok, err = self.parse("temp", "-")
+        self.assertFalse(ok)
+        self.assertIn("number", err)
+
     def test_choice_rejects_unknown_and_lists_options(self):
         ok, err = self.parse("cache_type_k", "q3_0")
         self.assertFalse(ok)
@@ -178,6 +192,13 @@ class TestEmit(unittest.TestCase):
     def test_raw_is_shlex_split(self):
         self.assertEqual(self.emit("extra", '--props --alias "my model"'),
                          ["--props", "--alias", "my model"])
+
+    def test_an_unset_server_default_emits_nothing(self):
+        """Settings with None default are not passed; they let llama-server use
+        its own defaults."""
+        self.assertEqual(self.emit("presence_penalty", None), [])
+        self.assertEqual(self.emit("repeat_penalty", None), [])
+        self.assertEqual(self.emit("repeat_last_n", None), [])
 
 
 class TestSpecGating(unittest.TestCase):

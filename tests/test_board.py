@@ -21,13 +21,22 @@ class TestRenderGroup(unittest.TestCase):
         for token in ("temp 0.6", "top-k 20", "top-p 0.95"):
             self.assertIn(token, text)
 
-    def test_penalties_row_shows_all_four(self):
-        """repeat defaults to 1.0, not 0.0 - it is a multiplier where 1.0 is the
-        no-op, unlike presence and frequency where 0.0 is."""
+    def test_penalties_are_unset_by_default_and_shown_as_such(self):
+        """No number should appear here until someone picks one. Pre-filling the
+        server's own defaults would put values on the board that nobody chose,
+        and they are not even uniform - 0.0 disables presence and frequency but
+        1.0 is what disables repeat - so a pre-filled row would mislead."""
         text = board.render_group(self.group("penalties"), self.values())
-        for token in ("presence 0.0", "frequency 0.0",
-                      "repeat 1.0", "repeat-last-n 64"):
+        for token in ("presence -", "frequency -", "repeat -", "repeat-last-n -"):
             self.assertIn(token, text)
+        for digit in "0123456789":
+            self.assertNotIn(digit, text)
+
+    def test_a_set_penalty_shows_its_value(self):
+        text = board.render_group(self.group("penalties"),
+                                  self.values(repeat_penalty=1.1))
+        self.assertIn("repeat 1.1", text)
+        self.assertIn("presence -", text)     # the others stay unset
 
     def test_toggles_render_on_and_off(self):
         text = board.render_group(self.group("toggles"),
