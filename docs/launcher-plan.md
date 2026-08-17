@@ -88,6 +88,17 @@ class TestCatalogShape(unittest.TestCase):
         keys = {s.key for g in catalog.GROUPS for s in g.settings}
         self.assertEqual(set(catalog.catalog_defaults()), keys)
 
+    def test_mutable_defaults_are_not_shared_between_calls(self):
+        """chat_template_kwargs defaults to a dict. If every caller received the
+        same object, one caller mutating it in place would poison the catalog
+        default for the entire process, and every config built afterwards would
+        silently inherit the change."""
+        a = catalog.catalog_defaults()
+        b = catalog.catalog_defaults()
+        self.assertIsNot(a["chat_template_kwargs"], b["chat_template_kwargs"])
+        a["chat_template_kwargs"]["leaked"] = True
+        self.assertEqual(catalog.catalog_defaults()["chat_template_kwargs"], {})
+
 
 class TestParseValue(unittest.TestCase):
     def parse(self, key, text):
@@ -202,6 +213,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'launcher.catalog'`
 Pinned to llama.cpp build 10453 (commit 3cb7ffb1a). If the binary is rebuilt and
 its allowed values change, update CACHE_TYPES / SPEC_TYPES below.
 """
+import copy
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -295,7 +307,11 @@ def settings_by_key():
 
 
 def catalog_defaults():
-    return {s.key: s.default for g in GROUPS for s in g.settings}
+    # deepcopy, not a plain dict comprehension: at least one default is mutable
+    # (chat_template_kwargs is {}). Handing every caller the same object means one
+    # caller mutating it in place poisons the default for the whole process, and
+    # every config created afterwards silently inherits the change.
+    return {s.key: copy.deepcopy(s.default) for g in GROUPS for s in g.settings}
 
 
 def _range_error(setting, value):
@@ -1136,13 +1152,25 @@ class TestSave(unittest.TestCase):
         return {"version": 2, "model_root": "D:/M", "llama_server": "D:/s.exe",
                 "defaults": defaults or {}, "configs": []}
 
+    def test_a_value_equal_to_the_FILE_default_is_excluded(self):
+        """The overlay is the entire point of this function, so one test must
+        fail if it is removed. context=4096 differs from the catalog default of
+        8192, but it IS the live file default, so a config sitting at 4096 has
+        nothing of its own to save. Delete the overlay loop and this fails."""
+        data = self.doc(defaults={"context": 4096})
+        values = config.resolve_values(data, {"settings": {}})
+        self.assertEqual(values["context"], 4096)
+        self.assertEqual(config.diff_from_defaults(data, values), {})
+
     def test_diff_keeps_only_what_differs(self):
         data = self.doc(defaults={"context": 4096})
         values = config.resolve_values(data, {"settings": {}})
-        values["context"] = 128000
-        values["temp"] = 0.6                       # equals the catalog default
+        values["port"] = 8082           # differs from the catalog default 8080
+        values["temp"] = 0.6            # equals the catalog default
         diff = config.diff_from_defaults(data, values)
-        self.assertEqual(diff, {"context": 128000})
+        # context is absent because it matches the FILE default, not because it
+        # matches the catalog one - without the overlay it would appear here.
+        self.assertEqual(diff, {"port": 8082})
 
     def test_diff_is_empty_when_nothing_changed(self):
         data = self.doc()
@@ -1169,6 +1197,28 @@ class TestSave(unittest.TestCase):
         with self.assertRaises(Exception):
             config.save(path, unserialisable)
         self.assertEqual(config.load(path)["defaults"]["context"], 4096)
+
+    def test_a_failed_save_leaves_no_temp_file(self):
+        """The success path is covered above. The failure path is the one that
+        matters: a half-written scratch file left beside the config is litter at
+        best, and confusing at worst."""
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "cfg.json")
+        config.save(path, self.doc())
+        unserialisable = self.doc()
+        unserialisable["configs"] = [{"bad": object()}]
+        with self.assertRaises(Exception):
+            config.save(path, unserialisable)
+        self.assertEqual(os.listdir(folder), ["cfg.json"])
+
+    def test_temp_path_is_same_directory_and_process_qualified(self):
+        """Same directory keeps os.replace atomic - it is only atomic within one
+        volume. The pid keeps two launcher instances from colliding."""
+        target = os.path.join(tempfile.mkdtemp(), "cfg.json")
+        tmp = config._temp_path(target)
+        self.assertEqual(os.path.dirname(tmp), os.path.dirname(target))
+        self.assertIn(str(os.getpid()), os.path.basename(tmp))
+        self.assertNotEqual(tmp, target)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1190,10 +1240,20 @@ def diff_from_defaults(data, values):
     return {k: v for k, v in values.items() if k in base and v != base[k]}
 
 
+def _temp_path(path):
+    """Scratch path for an atomic save.
+
+    Same directory as the target, because os.replace is only atomic within one
+    volume. Process-qualified, because two launcher instances saving at once
+    would otherwise race on one filename and the loser would fail with a
+    PermissionError it could not explain."""
+    folder = os.path.dirname(os.path.abspath(path))
+    return os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+
+
 def save(path, data):
     """Write atomically: a crash mid-write must not truncate the config file."""
-    folder = os.path.dirname(os.path.abspath(path))
-    tmp = os.path.join(folder, f".{os.path.basename(path)}.tmp")
+    tmp = _temp_path(path)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
