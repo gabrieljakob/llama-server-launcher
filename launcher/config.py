@@ -130,3 +130,29 @@ def migrate(profiles, model_root, llama_server):
     report.append(f"  wrote {len(doc['configs'])} configs; "
                   f"model_profiles.json left untouched as a rollback")
     return doc, report
+
+
+def diff_from_defaults(data, values):
+    """Only the values that differ from catalog defaults overlaid with file
+    defaults. Saving the fully resolved set instead would copy every value into
+    every config, and later edits to `defaults` would stop reaching them."""
+    base = catalog.catalog_defaults()
+    for key, value in (data.get("defaults") or {}).items():
+        if key in base:
+            base[key] = value
+    return {k: v for k, v in values.items() if k in base and v != base[k]}
+
+
+def save(path, data):
+    """Write atomically: a crash mid-write must not truncate the config file."""
+    folder = os.path.dirname(os.path.abspath(path))
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise

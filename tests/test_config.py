@@ -187,5 +187,45 @@ class TestMigrationRobustness(unittest.TestCase):
         self.assertTrue(any(name in line for line in report))
 
 
+class TestSave(unittest.TestCase):
+    def doc(self, defaults=None):
+        return {"version": 2, "model_root": "D:/M", "llama_server": "D:/s.exe",
+                "defaults": defaults or {}, "configs": []}
+
+    def test_diff_keeps_only_what_differs(self):
+        data = self.doc(defaults={"context": 4096})
+        values = config.resolve_values(data, {"settings": {}})
+        values["context"] = 128000
+        values["temp"] = 0.6                       # equals the catalog default
+        diff = config.diff_from_defaults(data, values)
+        self.assertEqual(diff, {"context": 128000})
+
+    def test_diff_is_empty_when_nothing_changed(self):
+        data = self.doc()
+        values = config.resolve_values(data, {"settings": {}})
+        self.assertEqual(config.diff_from_defaults(data, values), {})
+
+    def test_save_round_trips(self):
+        path = os.path.join(tempfile.mkdtemp(), "cfg.json")
+        data = self.doc(defaults={"context": 4096})
+        config.save(path, data)
+        self.assertEqual(config.load(path)["defaults"]["context"], 4096)
+
+    def test_save_leaves_no_temp_file_behind(self):
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "cfg.json")
+        config.save(path, self.doc())
+        self.assertEqual(os.listdir(folder), ["cfg.json"])
+
+    def test_save_does_not_destroy_the_original_on_failure(self):
+        path = os.path.join(tempfile.mkdtemp(), "cfg.json")
+        config.save(path, self.doc(defaults={"context": 4096}))
+        unserialisable = self.doc()
+        unserialisable["configs"] = [{"bad": object()}]
+        with self.assertRaises(Exception):
+            config.save(path, unserialisable)
+        self.assertEqual(config.load(path)["defaults"]["context"], 4096)
+
+
 if __name__ == "__main__":
     unittest.main()
