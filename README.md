@@ -7,7 +7,7 @@ Pick a named configuration, adjust any setting on a numbered board, press <kbd>E
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-success)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-362%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen)](#tests)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#porting)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#licence)
 
@@ -43,7 +43,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL.gguf   |  CUDA0: NVIDIA GeForce RTX 4080 (16375 Mi
   6  toggles      jinja on  no-mmproj on  reasoning on  effort xhigh  fa on  kv-unified on
   7  kv cache     K f16 / V f16
   8  batching     -np auto  -b 2048  -ub 512
-  9  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
+  9  speculative  draft-mtp  draft ngl auto  n-max 3  n-min 0  p-min 0.75
  10  template     preserve_thinking=true
  11  extra args   (none)
 
@@ -66,7 +66,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL.gguf   |  CUDA0: NVIDIA GeForce RTX 4080 (16375 Mi
 | **Backend-agnostic** | Asks the binary what devices it has instead of assuming a vendor — CUDA, ROCm, Vulkan, Metal or plain CPU. |
 | **Nothing hardcoded** | Two paths, asked once on first run, editable in JSON forever after. |
 | **Unset means unset** | A setting shown as `-` is not passed at all, so `llama-server`'s own default applies. |
-| **Speculative decoding, gated** | The three `--spec-type` families need different arguments; the board adapts and validates before launching. |
+| **Speculative decoding, gated** | The `--spec-type` families need different arguments — one requires a draft model, one merely accepts it, one ignores it. The board adapts and validates before launching. |
 | **Safe port takeover** | Offers to stop what owns the port *only* if it is a llama-server, re-verifying identity immediately before the kill. |
 | **Real readiness** | Polls until the port actually accepts a connection. It does not claim the server started until something answers. |
 
@@ -170,19 +170,26 @@ plus `os.replace` — so an interrupted write cannot leave you with a truncated 
 
 ## Speculative decoding
 
-The one part with real logic behind it. `llama-server` has three families of `--spec-type`, and
-they need different things:
+The one part with real logic behind it. The `--spec-type` families do not all want the same
+things, and the draft model is not a plain yes/no:
 
 | `spec_type` | Draft model | Emits |
 |---|:---:|---|
 | `none` | — | nothing |
 | `draft-simple`, `draft-eagle3`, `draft-dflash`, `draft-dspark` | **required** | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, shared knobs |
-| `draft-mtp` | **must not be set** — the head is in the model's own weights | `--spec-type`, shared knobs |
+| `draft-mtp` | **optional** | `--spec-type`, shared knobs, plus `--spec-draft-model` and `--spec-draft-ngl` once a path is set |
 | `ngram-*` | not used | `--spec-type`, shared knobs |
 
-The launcher validates this before launching rather than letting the server fail, and the
-speculative row adapts as you change the type — choosing `draft-mtp` never asks for a draft model,
-and switching to it clears a stale one.
+`draft-mtp` is the awkward one, and it is worth being precise about why. It normally needs a
+separate draft GGUF like any other `draft-*` type. It runs *without* one only when the
+multi-token-prediction head is built into the model's own weights — and that is a property of the
+**weights**, not of the type string. Nothing in the config distinguishes the two cases, so the
+launcher does not guess: the draft-model row is always offered and never demanded. Set a path and
+it is sent, and checked for existence before launch; leave it blank and no flag is emitted.
+
+The launcher validates the required types before launching rather than letting the server fail,
+and the speculative row adapts as you change the type — switching to an `ngram-*` type clears a
+draft model that can no longer be used, and says so rather than dropping it silently.
 
 Draft models never appear in the config menu. A `.gguf` that is a draft model is a *property* of a
 config, not a launchable thing.
@@ -203,7 +210,7 @@ exiting, and reports one of three outcomes: the URL, the exit code, or a timeout
 python -m unittest discover -s tests -t . -v
 ```
 
-**362 tests, standard library only.**
+**377 tests, standard library only.**
 
 <details>
 <summary><b>Why the count is not the point</b></summary>
@@ -231,7 +238,7 @@ launcher/
   server.py     port ownership, targeted kill, spawn, readiness polling
   board.py      config menu, settings board, row editors, PowerShell quoting
   __main__.py   entry point; wiring only
-tests/          362 tests
+tests/          377 tests
 docs/           design spec and implementation plan
 ```
 
