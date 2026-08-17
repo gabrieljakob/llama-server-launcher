@@ -19,9 +19,26 @@ ONOFFAUTO = ["on", "off", "auto"]
 # itself accepts any string here. These are the levels build 10453 documents.
 REASONING_EFFORTS = ["default", "minimal", "low", "medium", "high", "xhigh", "max"]
 
-# Spec types needing a separate draft-model GGUF. draft-mtp is deliberately absent:
-# the multi-token-prediction head is built into the model's own weights.
+# Spec types that CANNOT launch without a separate draft-model GGUF.
 DRAFT_MODEL_TYPES = {"draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark"}
+
+# Spec types that TAKE a draft model but do not require one. draft-mtp normally
+# needs a draft GGUF like any other draft-* type; it goes without only when the
+# multi-token-prediction head is built into the model's own weights, and that is
+# a property of the weights, not of the type. The launcher cannot tell the two
+# apart by reading the string, so it offers the row and demands nothing - the
+# previous split had no such tier, treated every draft-mtp config as head-in-
+# weights, and made the ordinary case impossible to express: the board hid the
+# row, active_keys dropped the key, and edit_group deleted a hand-edited path.
+DRAFT_MODEL_OPTIONAL_TYPES = {"draft-mtp"}
+
+
+def _takes_draft_model(types):
+    """True when any of these types can carry a separate draft GGUF at all,
+    required or optional. Gating asks this; only spec_error asks the stricter
+    'must have one' question, off DRAFT_MODEL_TYPES alone."""
+    return any(t in DRAFT_MODEL_TYPES or t in DRAFT_MODEL_OPTIONAL_TYPES
+               for t in types)
 
 
 @dataclass
@@ -432,7 +449,7 @@ def spec_carries_own_head(values):
         return False
     if "none" in types:
         return False
-    return not any(t in DRAFT_MODEL_TYPES for t in types)
+    return not _takes_draft_model(types)
 
 
 def spec_error(values):
@@ -502,8 +519,10 @@ def active_keys(values):
         return keys - {"spec_type", "draft_model", "spec_ngl",
                        "spec_n_max", "spec_n_min", "spec_p_min"}
 
-    if not any(t in DRAFT_MODEL_TYPES for t in types):
-        # draft-mtp and every ngram-* type run without a separate draft GGUF
+    if not _takes_draft_model(types):
+        # every ngram-* type runs without a separate draft GGUF. draft-mtp is
+        # NOT dropped here: it may or may not need one, so the key stays live
+        # and emits whenever a path is actually set.
         keys -= {"draft_model", "spec_ngl"}
     return keys
 

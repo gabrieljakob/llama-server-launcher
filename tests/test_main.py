@@ -732,14 +732,27 @@ class TestDraftModelIsCheckedOnlyWhenItIsEmitted(LaunchFixture):
         self.assertNotIn("--spec-draft-model", calls["spawned"][0],
                          "precondition: the flag really is never sent")
 
-    def test_draft_mtp_ignores_it_too(self):
-        """The prediction head is in the model's own weights, so draft-mtp is
-        the one draft-* type that needs no separate GGUF."""
+    def test_draft_mtp_checks_a_draft_model_it_is_going_to_send(self):
+        """draft-mtp emits --spec-draft-model whenever one is set, so a path that
+        has gone missing must stop the launch exactly as it does for the required
+        types. This used to be waved through: the flag was dropped before it
+        could be sent, so the check had nothing to guard."""
         values = self.values(spec_type="draft-mtp",
                              draft_model="gone/stale-draft.gguf")
         result, text, calls = self.launch(values)
+        self.assertIs(result, False)
+        self.assertIn("draft model is gone", text)
+        self.assertEqual(calls["spawned"], [])
+
+    def test_bare_draft_mtp_launches_with_no_draft_model_at_all(self):
+        """The head-in-the-weights case: nothing on the draft row, nothing to
+        check, nothing to send. Without this, 'make draft-mtp required' would
+        pass the test above and still be wrong."""
+        values = self.values(spec_type="draft-mtp")
+        result, text, calls = self.launch(values)
         self.assertIs(result, True)
         self.assertNotIn("draft model is gone", text)
+        self.assertNotIn("--spec-draft-model", calls["spawned"][0])
 
     def test_a_missing_draft_model_still_stops_a_type_that_needs_one(self):
         """Otherwise 'delete the check' passes both tests above, and the launch

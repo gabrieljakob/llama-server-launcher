@@ -303,7 +303,9 @@ class TestSpecGating(unittest.TestCase):
         v = self.values(spec_type="draft-dflash", draft_model="d.gguf")
         self.assertIsNone(catalog.spec_error(v))
 
-    def test_mtp_emits_spec_type_but_no_draft_model(self):
+    def test_bare_mtp_emits_spec_type_and_the_shared_knobs(self):
+        """No draft path passed, so no --spec-draft-model: the head-in-the-
+        weights case. The shared knobs travel with every active spec type."""
         v = self.values(spec_type="draft-mtp", spec_n_max=3, spec_p_min=0.75)
         argv = catalog.build_argv(v, "m.gguf", "a")
         self.assertIn("--spec-type", argv)
@@ -312,16 +314,24 @@ class TestSpecGating(unittest.TestCase):
         self.assertIn("--spec-draft-n-max", argv)
         self.assertIn("--spec-draft-p-min", argv)
 
-    def test_mtp_with_a_stale_draft_model_still_launches_without_the_flag(self):
-        """It used to be refused, with a message telling the user to clear a row
-        the board hides for exactly this type. active_keys already drops
-        draft_model for draft-mtp, so the flag provably cannot be sent: the
-        command line is correct and there is nothing left to refuse."""
-        v = self.values(spec_type="draft-mtp", draft_model="d.gguf")
-        self.assertIsNone(catalog.spec_error(v))
-        argv = catalog.build_argv(v, "m.gguf", "a")
-        self.assertNotIn("--spec-draft-model", argv)
-        self.assertNotIn("d.gguf", argv)
+    def test_mtp_never_demands_a_draft_model(self):
+        """It is the optional tier: valid with one and valid without. Only the
+        DRAFT_MODEL_TYPES four are refused for going bare."""
+        self.assertIsNone(catalog.spec_error(self.values(spec_type="draft-mtp")))
+        self.assertIsNone(catalog.spec_error(
+            self.values(spec_type="draft-mtp", draft_model="d.gguf")))
+
+    def test_the_flag_needs_the_resolved_path_not_just_the_setting(self):
+        """build_argv emits --spec-draft-model from its draft_path argument, not
+        from values: the caller resolves the path against the model root first.
+        A set draft_model with no resolved path emits nothing, for every type."""
+        for spec_type in ("draft-mtp", "draft-dflash"):
+            with self.subTest(spec_type=spec_type):
+                v = self.values(spec_type=spec_type, draft_model="d.gguf")
+                argv = catalog.build_argv(v, "m.gguf", "a")
+                self.assertNotIn("--spec-draft-model", argv)
+                argv = catalog.build_argv(v, "m.gguf", "a", draft_path="D:/d.gguf")
+                self.assertIn("--spec-draft-model", argv)
 
     def test_ngram_needs_no_draft_model(self):
         v = self.values(spec_type="ngram-mod")
@@ -721,11 +731,19 @@ class TestSpecCarriesOwnHead(unittest.TestCase):
         return v
 
     def test_true_for_the_built_in_types(self):
-        for spec_type in ("draft-mtp", "ngram-simple", "ngram-mod",
+        for spec_type in ("ngram-simple", "ngram-mod",
                           "ngram-cache", "ngram-mod,ngram-cache"):
             with self.subTest(spec_type=spec_type):
                 self.assertTrue(
                     catalog.spec_carries_own_head(self.values(spec_type)))
+
+    def test_false_for_draft_mtp(self):
+        """draft-mtp can take a draft model, so the type alone does not say the
+        head is built in - that depends on the weights. Saying True here hid the
+        draft-model row and dropped the flag for every MTP config."""
+        self.assertFalse(catalog.spec_carries_own_head(self.values("draft-mtp")))
+        self.assertFalse(
+            catalog.spec_carries_own_head(self.values("draft-mtp,ngram-mod")))
 
     def test_false_for_an_unrecognised_or_typod_type(self):
         for spec_type in ("ngram-modd", "draft-mtpp", "", "3",

@@ -56,16 +56,18 @@ class TestRenderGroup(unittest.TestCase):
         text = board.render_group(self.group("spec"), self.values(spec_type="none"))
         self.assertEqual(text, "none")
 
-    def test_mtp_is_labelled_built_in(self):
+    def test_mtp_is_not_labelled_built_in(self):
+        """Whether the prediction head is in the weights is a property of the
+        model, not of the type, so the row must not assert it. It used to say
+        "(built-in, no draft model)" for every draft-mtp config."""
         text = board.render_group(self.group("spec"), self.values(spec_type="draft-mtp"))
         self.assertIn("draft-mtp", text)
-        self.assertIn("built-in", text)
-        self.assertNotIn("draft ngl", text)   # meaningless without a draft model
+        self.assertNotIn("built-in", text)
 
-    def test_ngram_types_are_also_labelled_built_in(self):
-        """draft-mtp is not the only draft-model-free type. Testing only it would
-        let a regression to `if spec_type == "draft-mtp"` pass, which is exactly
-        the hardcoding the active_keys call exists to avoid."""
+    def test_ngram_types_are_labelled_built_in(self):
+        """The ngram-* family is the tier that genuinely never takes a draft
+        GGUF. Testing more than one would-be member keeps a regression to
+        `if spec_type == "ngram-mod"` from passing."""
         for spec_type in ("ngram-mod", "ngram-simple", "ngram-cache"):
             with self.subTest(spec_type=spec_type):
                 text = board.render_group(self.group("spec"),
@@ -789,25 +791,43 @@ class TestEditGroup(unittest.TestCase):
         self.assertEqual(consumed, ["none"])
         self.assertEqual(out["spec_type"], "none")
 
-    def test_mtp_skips_the_draft_model_prompt(self):
+    def test_mtp_offers_the_draft_model_prompt(self):
+        """draft-mtp takes an OPTIONAL draft model, so the row has to be offered.
+        Skipping it was what made the ordinary MTP setup - a separate draft GGUF
+        - impossible to enter from the board at all."""
+        out = board.edit_group(
+            self.group("spec"), self.values(),
+            self.scripted(["draft-mtp", "d/MTP-Draft.gguf", "99", "3", "0", "0.75"]),
+            lambda t: None)
+        self.assertEqual(out["spec_type"], "draft-mtp")
+        self.assertEqual(out["draft_model"], "d/MTP-Draft.gguf")
+        self.assertEqual(out["spec_ngl"], "99")
+        self.assertEqual(out["spec_p_min"], 0.75)
+
+    def test_mtp_leaves_the_draft_model_unset_when_the_row_is_blanked(self):
+        """The head-in-the-weights case. Blank keeps the current value, which is
+        nothing, and that must still be launchable."""
         out = board.edit_group(self.group("spec"), self.values(),
-                               self.scripted(["draft-mtp", "3", "0", "0.75"]),
+                               self.scripted(["draft-mtp", "", "", "3", "0", "0.75"]),
                                lambda t: None)
         self.assertEqual(out["spec_type"], "draft-mtp")
-        self.assertEqual(out["spec_p_min"], 0.75)
         self.assertIsNone(out["draft_model"])
+        self.assertIsNone(catalog.spec_error(out), "must be launchable bare")
 
     def test_switching_to_a_built_in_type_clears_a_stale_draft_model(self):
         """Otherwise the user is stranded: editable_keys hides the draft-model
-        row for draft-mtp, so they cannot clear it, while spec_error refuses to
-        launch and tells them to clear it. The UI must not issue an instruction
-        it gives no way to obey."""
+        row for the ngram-* family, so they cannot clear it, while spec_error
+        refuses to launch and tells them to clear it. The UI must not issue an
+        instruction it gives no way to obey.
+
+        draft-mtp is deliberately NOT the type under test here any more - it
+        keeps its draft model, because it can use one."""
         said = []
         out = board.edit_group(
             self.group("spec"),
             self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf"),
-            self.scripted(["draft-mtp", "3", "0", "0.0"]), said.append)
-        self.assertEqual(out["spec_type"], "draft-mtp")
+            self.scripted(["ngram-mod", "3", "0", "0.0"]), said.append)
+        self.assertEqual(out["spec_type"], "ngram-mod")
         self.assertIsNone(out["draft_model"])
         self.assertIsNone(catalog.spec_error(out), "must now be launchable")
         self.assertTrue(any("cleared the draft model" in s for s in said),
