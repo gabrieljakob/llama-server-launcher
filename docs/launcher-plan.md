@@ -2053,6 +2053,24 @@ class TestDispatch(unittest.TestCase):
     def test_input_is_case_insensitive_and_trimmed(self):
         self.assertEqual(board.dispatch("  S  "), "save")
 
+    def test_a_unicode_digit_int_cannot_parse_does_not_crash(self):
+        """Superscript two satisfies str.isdigit() but int() rejects it, so an
+        isdigit() gate crashes the launcher on a pasted character. The
+        constraint is that invalid input never raises - unknown is fine."""
+        self.assertEqual(board.dispatch("²"), "unknown")
+
+    def test_a_real_unicode_digit_still_selects_a_row(self):
+        """Arabic-Indic three is a genuine decimal digit; int() converts it.
+        Narrowing to isdecimal() must not reject it."""
+        self.assertEqual(board.dispatch("٣"), "edit:3")
+
+    def test_no_input_raises(self):
+        """Nothing typed at this prompt may escape as an exception."""
+        for key in ["", "  ", "abc", "-1", "0", "11", "999999999999999999999",
+                    "1.5", "²", "٣", "!", "  Q  ", "\t\n"]:
+            with self.subTest(key=key):
+                self.assertIsInstance(board.dispatch(key), str)
+
 
 class TestEditGroup(unittest.TestCase):
     def group(self, key):
@@ -2126,6 +2144,30 @@ class TestEditGroup(unittest.TestCase):
         self.assertEqual(out["spec_type"], "draft-mtp")
         self.assertEqual(out["spec_p_min"], 0.75)
         self.assertIsNone(out["draft_model"])
+
+    def test_switching_to_a_built_in_type_clears_a_stale_draft_model(self):
+        """Otherwise the user is stranded: editable_keys hides the draft-model
+        row for draft-mtp, so they cannot clear it, while spec_error refuses to
+        launch and tells them to clear it. The UI must not issue an instruction
+        it gives no way to obey."""
+        said = []
+        out = board.edit_group(
+            self.group("spec"),
+            self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf"),
+            self.scripted(["draft-mtp", "3", "0", "0.0"]), said.append)
+        self.assertEqual(out["spec_type"], "draft-mtp")
+        self.assertIsNone(out["draft_model"])
+        self.assertIsNone(catalog.spec_error(out), "must now be launchable")
+        self.assertTrue(any("cleared the draft model" in s for s in said),
+                        "clearing it silently would be its own surprise")
+
+    def test_a_draft_type_keeps_its_draft_model(self):
+        """The clearing must be specific to types that carry their own head."""
+        out = board.edit_group(
+            self.group("spec"),
+            self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf"),
+            self.scripted(["draft-dspark", "", "4", "0", "0.0"]), lambda t: None)
+        self.assertEqual(out["draft_model"], "d/DFlash.gguf")
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -2140,7 +2182,12 @@ def dispatch(key):
     key = (key or "").strip().lower()
     if key == "":
         return "launch"
-    if key.isdigit():
+    # isdecimal, NOT isdigit. isdigit() accepts characters int() then rejects -
+    # superscript two is the clearest case: "²".isdigit() is True but
+    # int("²") raises ValueError, crashing the launcher on a pasted
+    # character. isdecimal() still accepts genuine non-ASCII digits such as
+    # Arabic-Indic "٣", which int() converts correctly to 3.
+    if key.isdecimal():
         n = int(key)
         return f"edit:{n}" if 1 <= n <= len(catalog.GROUPS) else "unknown"
     return {"s": "save", "c": "command", "q": "quit"}.get(key, "unknown")
@@ -2179,6 +2226,16 @@ def edit_group(group, values, ask, say):
                 values[setting.key] = result
                 break
             say(f"    {result}")
+
+    # Switching to a spec type that carries its own prediction head leaves a
+    # stale draft_model behind. editable_keys then hides that row, so the user
+    # cannot reach it - yet spec_error refuses to launch and tells them to
+    # "clear the draft model row". That is an instruction the UI cannot obey.
+    # Clear it here and say so, rather than stranding them.
+    if (group.key == "spec" and values.get("draft_model")
+            and "draft_model" not in catalog.editable_keys(values)):
+        say(f"    cleared the draft model: {values['spec_type']} carries its own")
+        values["draft_model"] = None
     return values
 ```
 
@@ -2231,6 +2288,19 @@ DEFAULT_ROOT = r"D:\LLM Models"
 DEFAULT_EXE = r"D:\llama.cpp\llama-server.exe"
 
 
+def ask(prompt=""):
+    """input() that treats EOF and Ctrl-C as "quit" instead of a traceback.
+
+    A piped, redirected or closed stdin makes input() raise EOFError, and Ctrl-C
+    raises KeyboardInterrupt. Either would end the session with a stack trace
+    across the user's console. Every prompt in this module goes through here."""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "q"
+
+
 def first_run_migration():
     if os.path.exists(CONFIG_PATH) or not os.path.exists(LEGACY_PATH):
         return
@@ -2279,8 +2349,8 @@ def launch(data, cfg, values):
             print(f"\n  port {port} is held by {name} (pid {pid}), not a "
                   f"llama-server. Change the port on row 3.\n")
             return
-        if input(f"  port {port} is held by llama-server (pid {pid}). "
-                 f"Stop it? [Y/n] ").strip().lower() in ("", "y"):
+        if ask(f"  port {port} is held by llama-server (pid {pid}). "
+               f"Stop it? [Y/n] ").strip().lower() in ("", "y"):
             # expect_name re-checks identity at kill time. The snapshot above is
             # as old as the user's pause at this prompt, and Windows recycles
             # pids - without this, a server that exited meanwhile could hand its
@@ -2310,7 +2380,7 @@ def run_board(data, cfg):
 
     while True:
         print("\n" + board.render_board(values, dirty, header))
-        action = board.dispatch(input("> "))
+        action = board.dispatch(ask("> "))
 
         if action == "quit":
             return
@@ -2334,7 +2404,7 @@ def run_board(data, cfg):
         if action.startswith("edit:"):
             group = catalog.GROUPS[int(action.split(":")[1]) - 1]
             before = dict(values)
-            values = board.edit_group(group, values, input, print)
+            values = board.edit_group(group, values, ask, print)
             if values != before:
                 dirty.add(group.key)
             continue
@@ -2349,11 +2419,11 @@ def new_config(data):
     for i, path in enumerate(models, 1):
         print(f"  {i:>2}  {os.path.relpath(path, data['model_root'])}")
     try:
-        chosen = models[int(input("\n  model number: ").strip()) - 1]
+        chosen = models[int(ask("\n  model number: ").strip()) - 1]
     except (ValueError, IndexError):
         print("  invalid selection")
         return None
-    name = input("  config name: ").strip()
+    name = ask("  config name: ").strip()
     if not name:
         return None
     if any(c["name"] == name for c in data["configs"]):
@@ -2386,7 +2456,7 @@ def main():
         sizes = {n: os.path.getsize(p) for n, p in resolved.items()
                  if n not in missing}
         print("\n" + board.render_menu(data["configs"], missing, sizes))
-        choice = input("> ").strip().lower()
+        choice = ask("> ").strip().lower()
 
         if choice == "q":
             return 0
