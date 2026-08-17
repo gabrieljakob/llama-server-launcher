@@ -640,18 +640,16 @@ class TestAnchorCommands(unittest.TestCase):
     def test_qwen38_preserve_thinking_coding(self):
         v = catalog.catalog_defaults()
         v.update({"temp": 0.6, "presence_penalty": 0.0, "kv_unified": "on",
-                  "reasoning_effort": "xhigh",
+                  "reasoning": "on", "reasoning_effort": "xhigh",
                   "spec_type": "draft-mtp", "spec_n_max": 3, "spec_p_min": 0.75,
-                  "chat_template_kwargs": {"preserve_thinking": True,
-                                           "enable_thinking": True}})
+                  "chat_template_kwargs": {"preserve_thinking": True}})
         argv = catalog.build_argv(v, "qwen.gguf", "qwen3.8")
         self.assertPairsPresent(argv, [
             ("--spec-type", "draft-mtp"), ("--spec-draft-n-max", "3"),
             ("--spec-draft-p-min", "0.75"), ("--temp", "0.6"),
             ("--presence-penalty", "0.0"),
-            ("--reasoning-effort", "xhigh"),
-            ("--chat-template-kwargs",
-             '{"preserve_thinking":true,"enable_thinking":true}'),
+            ("--reasoning", "on"), ("--reasoning-effort", "xhigh"),
+            ("--chat-template-kwargs", '{"preserve_thinking":true}'),
         ])
         self.assertIn("--kv-unified", argv)
         self.assertNotIn("--spec-draft-model", argv)
@@ -1956,6 +1954,34 @@ class TestRenderBoard(unittest.TestCase):
         self.assertIn("batching", starred[0])
 
 
+class TestAsPowerShell(unittest.TestCase):
+    """The [c] command must paste into PowerShell 5.1 and run. Every expectation
+    here was checked against the real llama-server: the plain single-quoted form
+    is REJECTED because PowerShell strips embedded double quotes before a native
+    command sees them, and the backslash-inside-single-quotes form is accepted."""
+
+    def test_plain_arguments_are_left_bare(self):
+        self.assertEqual(board.as_powershell(["a.exe", "--temp", "0.6"]),
+                         "& a.exe --temp 0.6")
+
+    def test_paths_with_spaces_are_single_quoted(self):
+        out = board.as_powershell(["a.exe", r"D:\LLM Models\x.gguf"])
+        self.assertIn(r"'D:\LLM Models\x.gguf'", out)
+
+    def test_json_gets_both_layers_of_quoting(self):
+        """Single quotes alone are not enough - that form was rejected by the
+        binary because PowerShell ate the inner double quotes."""
+        out = board.as_powershell(["a.exe", '{"preserve_thinking":true}'])
+        self.assertIn(r"""'{\"preserve_thinking\":true}'""", out)
+
+    def test_a_literal_single_quote_is_doubled(self):
+        out = board.as_powershell(["a.exe", "it's"])
+        self.assertIn("'it''s'", out)
+
+    def test_the_call_operator_is_present(self):
+        self.assertTrue(board.as_powershell(["a.exe"]).startswith("& "))
+
+
 class TestRenderMenu(unittest.TestCase):
     CONFIGS = [{"name": "qwen3.6", "model": "Qwen3.6/q.gguf"},
                {"name": "gemma4", "model": "unsloth/g.gguf"}]
@@ -2096,6 +2122,40 @@ def _size_label(size):
     if not size:
         return " " * 8
     return f"{size / 1024 ** 3:>5.1f} GB"
+
+
+_PS_SPECIAL = " \t\"'`$&|<>(){}[];,@#"
+
+
+def _ps_quote(arg):
+    """Quote one argument for Windows PowerShell 5.1 invoking a native exe.
+
+    TWO layers, both required. Verified empirically against llama-server:
+
+      '{"k":true}'     REJECTED - PowerShell 5.1 strips embedded double quotes
+                       when handing a string to a native command, so the binary
+                       receives {k:true} and its JSON parser refuses it.
+      "{\\"k\\":true}"   REJECTED - double-quoted strings interpolate.
+      '{\\"k\\":true}'   WORKS - the backslashes let the receiving C runtime
+                       recover the quotes, and the single quotes stop PowerShell
+                       touching the backslashes on the way through.
+
+    subprocess.list2cmdline is NOT used here: it emits the CreateProcess
+    convention, which cmd.exe and Popen understand but PowerShell mangles. The
+    actual launch is unaffected either way - spawn() passes argv as a list and
+    never builds a command string - this function exists purely so the command
+    shown by [c] can be pasted into the shell this user actually works in."""
+    if arg and not any(c in arg for c in _PS_SPECIAL):
+        return arg
+    return "'" + arg.replace('"', '\\"').replace("'", "''") + "'"
+
+
+def as_powershell(argv):
+    """argv -> a PowerShell command line that can be pasted and run.
+
+    The leading & is PowerShell's call operator, needed whenever the executable
+    path is quoted and harmless when it is not."""
+    return "& " + " ".join(_ps_quote(a) for a in argv)
 
 
 def render_menu(configs, missing, sizes=None):
@@ -2528,7 +2588,7 @@ def run_board(data, cfg):
                      if values.get("draft_model") else None)
             argv = [data["llama_server"]] + catalog.build_argv(
                 values, model_path, cfg.get("alias") or cfg["name"], draft)
-            print("\n" + subprocess.list2cmdline(argv) + "\n")
+            print("\n" + board.as_powershell(argv) + "\n")
             continue
         if action == "save":
             cfg["settings"] = config.diff_from_defaults(data, values)
@@ -2662,7 +2722,7 @@ Open `launcher_configs.json` and append the `gemma4dflash` and `qwen3.8-preserve
 
 Run `python -m launcher`, select `qwen3.8-preserve-thinking-coding`, press `c`.
 
-Expected: the printed command contains `--spec-type draft-mtp`, `--spec-draft-n-max 3`, `--spec-draft-p-min 0.75`, `--kv-unified`, and `--chat-template-kwargs {"preserve_thinking":true,"enable_thinking":true}`, and contains **no** `--spec-draft-model`.
+Expected: the printed command is PowerShell-pasteable and contains `--spec-type draft-mtp`, `--spec-draft-n-max 3`, `--spec-draft-p-min 0.75`, `--kv-unified`, `--reasoning on`, `--reasoning-effort xhigh`, and `--chat-template-kwargs '{\"preserve_thinking\":true}'`, and contains **no** `--spec-draft-model`.
 
 - [ ] **Step 6: One real launch**
 

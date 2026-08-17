@@ -129,23 +129,23 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
 | 4 sampling | `temp`, `top_k`, `top_p`, `min_p` | `--temp`, `--top-k`, `--top-p`, `--min-p` | float ≥ 0, int ≥ 0, float 0–1, float 0–1 | 0.6, 20, 0.95, 0.0 |
 | 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | **all unset** |
-
-**The penalties row defaults to unset**, not to llama-server's values (which are
-`0.0 / 0.0 / 1.0 / 64`). Pre-filling them would put numbers on the board that nobody
-chose, and someone unfamiliar with these samplers cannot tell a default from a decision.
-The pairing is not even uniform — `0.0` disables presence and frequency, but `1.0` is what
-disables repeat — so a pre-filled row would actively mislead about what "off" looks like.
-Unset renders as `-`, emits no flag at all, and llama-server applies its own default. A
-number appears only once someone sets one, and `-` sets it back.
-
-This is the general rule for any setting whose catalog default is `None`: we do not pass
-that flag. `draft_model` is the other one.
 | 6 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
 | 7 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
 | 8 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
 | 9 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
 | 10 template | `chat_template_kwargs` | `--chat-template-kwargs` | JSON object | `{}` |
 | 11 extra args | `extra` | *(verbatim)* | str | `""` |
+
+**The penalties row defaults to unset**, not to llama-server's values (`0.0 / 0.0 / 1.0 /
+64`). Pre-filling them would put numbers on the board that nobody chose, and someone
+unfamiliar with these samplers cannot tell a default from a decision. The pairing is not
+even uniform — `0.0` disables presence and frequency, but `1.0` is what disables repeat —
+so a pre-filled row would actively mislead about what "off" looks like. Unset renders as
+`-`, emits no flag at all, and llama-server applies its own default. A number appears only
+once someone sets one, and typing `-` sets it back.
+
+That is the general rule for any setting whose catalog default is `None`: we do not pass
+that flag. `draft_model` is the other one.
 
 **Allowed values**, from `llama-server --help` on build 10453:
 
@@ -172,7 +172,7 @@ Type-driven, so adding a setting never means touching the command builder:
   off disappears rather than becoming `--metrics false`.
 - **Tri types** emit nothing when unset, `--flag` when on, `--no-flag` when off.
 - **The template row** is stored as a JSON object and emitted as a compact JSON *string*:
-  `--chat-template-kwargs {"preserve_thinking":true,"enable_thinking":true}`. Storing it
+  `--chat-template-kwargs {"preserve_thinking":true}`. Storing it
   as an object keeps the config file readable and lets the board validate it as JSON
   before launch rather than after. Emitted only when non-empty.
 - **The extra-args row** is `shlex.split` and appended last, so a user flag can override an earlier one.
@@ -238,9 +238,9 @@ move out of Python and into this file — relocating a drive no longer means edi
       "alias": "qwen3.8",
       "settings": {
         "temp": 0.6, "presence_penalty": 0.0,
-        "kv_unified": "on", "reasoning_effort": "xhigh",
+        "kv_unified": "on", "reasoning": "on", "reasoning_effort": "xhigh",
         "spec_type": "draft-mtp", "spec_n_max": 3, "spec_p_min": 0.75,
-        "chat_template_kwargs": { "preserve_thinking": true, "enable_thinking": true }
+        "chat_template_kwargs": { "preserve_thinking": true }
       } }
   ]
 }
@@ -319,7 +319,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   7  kv cache     K f16 / V f16
   8  batching     -np auto  -b 2048  -ub 512
 * 9  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
- 10  template     preserve_thinking=true  enable_thinking=true
+ 10  template     preserve_thinking=true
  11  extra args   (none)
 
   [1-11] edit   [s] save   [c] show command   [Enter] launch   [q] back
@@ -401,7 +401,7 @@ Around it:
 - **Second anchor test:** the `qwen3.8-preserve-thinking-coding` config builds argv
   containing `--kv-unified`, `--spec-type draft-mtp`, `--spec-draft-n-max 3`,
   `--spec-draft-p-min 0.75`, `--temp 0.6`, `--presence-penalty 0.0` and
-  `--chat-template-kwargs {"preserve_thinking":true,"enable_thinking":true}`.
+  `--reasoning on`, and `--chat-template-kwargs {"preserve_thinking":true}`.
 - `test_server.py` — port-owner parsing against a captured `netstat -ano` fixture string.
   No live sockets.
 - `test_board.py` — input dispatch and row rendering through an injected input function.
@@ -417,6 +417,13 @@ Around it:
   becomes a catalog row rather than an extra-args string.
 - **`LLAMA.bat` was deleted** on 2026-08-17. It pointed at a nonexistent path
   (`D:\llama.cpp\models\Qwen3.6\...`) and is fully superseded by this design.
+- **`enable_thinking` was moved off `chat_template_kwargs` onto `--reasoning on`** on
+  2026-08-17. Build 10453 warns: "Setting 'enable_thinking' via --chat-template-kwargs is
+  deprecated. Use --reasoning on / --reasoning off instead." Tested one kwarg at a time:
+  `enable_thinking` warns, `preserve_thinking` does not. Neither is a parse error, so the
+  original preset worked - but half of it was on a path the binary has announced it is
+  retiring. The preset now sets `reasoning: "on"` and keeps only `preserve_thinking` in
+  the template kwargs.
 - **`--reasoning-preserve` and `chat_template_kwargs.preserve_thinking` are different
   mechanisms**, and both are catalogued. The template kwarg is passed through to the jinja
   template; the flag is a server-level setting that the help text notes only works with
