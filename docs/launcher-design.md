@@ -127,13 +127,14 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 1 context | `context` | `-c` | int > 0 | 8192 |
 | 2 gpu layers | `gpu_layers` | `-ngl` | `auto` \| `all` \| int ≥ 0 | `auto` |
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
-| 4 sampling | `temp`, `top_k`, `top_p`, `min_p`, `presence_penalty` | `--temp`, `--top-k`, `--top-p`, `--min-p`, `--presence-penalty` | float ≥ 0, int ≥ 0, float 0–1, float 0–1, float | 0.6, 20, 0.95, 0.0, 0.0 |
-| 5 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
-| 6 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
-| 7 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
-| 8 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
-| 9 template | `chat_template_kwargs` | `--chat-template-kwargs` | JSON object | `{}` |
-| 10 extra args | `extra` | *(verbatim)* | str | `""` |
+| 4 sampling | `temp`, `top_k`, `top_p`, `min_p` | `--temp`, `--top-k`, `--top-p`, `--min-p` | float ≥ 0, int ≥ 0, float 0–1, float 0–1 | 0.6, 20, 0.95, 0.0 |
+| 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | 0.0, 0.0, **1.0**, 64 |
+| 6 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
+| 7 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
+| 8 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
+| 9 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
+| 10 template | `chat_template_kwargs` | `--chat-template-kwargs` | JSON object | `{}` |
+| 11 extra args | `extra` | *(verbatim)* | str | `""` |
 
 **Allowed values**, from `llama-server --help` on build 10453:
 
@@ -159,16 +160,16 @@ Type-driven, so adding a setting never means touching the command builder:
 - **Bool types** emit the bare flag when true, and emit *nothing* when false. `--metrics`
   off disappears rather than becoming `--metrics false`.
 - **Tri types** emit nothing when unset, `--flag` when on, `--no-flag` when off.
-- **Row 9** is stored as a JSON object and emitted as a compact JSON *string*:
+- **The template row** is stored as a JSON object and emitted as a compact JSON *string*:
   `--chat-template-kwargs {"preserve_thinking":true,"enable_thinking":true}`. Storing it
   as an object keeps the config file readable and lets the board validate it as JSON
   before launch rather than after. Emitted only when non-empty.
-- **Row 10** is `shlex.split` and appended last, so a user flag can override an earlier one.
+- **The extra-args row** is `shlex.split` and appended last, so a user flag can override an earlier one.
 - `--model` and `--alias` come from the config record itself, not the catalog.
 
 ### Speculative decoding gating
 
-Row 8 is gated on **`spec_type`**, not on `draft_model`. The three families behave
+The speculative row is gated on **`spec_type`**, not on `draft_model`. The three families behave
 differently and a single rule cannot cover them:
 
 | `spec_type` | Draft model | Emits |
@@ -283,12 +284,12 @@ collides with an existing config). `alias` defaults to the name. The board then 
 catalog and file defaults, and the config is only written on `[s]`.
 
 Scanning still walks `model_root` for `*.gguf` (skipping `mmproj*`), but scanned files
-appear **only** under `[n]` and the row-8 draft picker — never as menu entries. This is
+appear **only** under `[n]` and the speculative-row draft picker — never as menu entries. This is
 what stops draft models masquerading as launchable models.
 
-Row 8 edits `spec_type` first, then adapts: a `draft-*` type opens the `.gguf` picker for
+Row 9 edits `spec_type` first, then adapts: a `draft-*` type opens the `.gguf` picker for
 `draft_model` and prompts `spec_ngl`; `draft-mtp` and the `ngram-*` types skip straight to
-the shared knobs; `none` skips the rest entirely. Row 9 accepts a JSON object and
+the shared knobs; `none` skips the rest entirely. The template row accepts a JSON object and
 re-prompts on a parse error, so a malformed template kwarg is caught at edit time rather
 than surfacing as a server startup failure.
 
@@ -301,19 +302,20 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   1  context      32768
   2  gpu layers   auto
   3  host:port    127.0.0.1:8080
-  4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0  presence 0.0
-  5  toggles      jinja on  no-mmproj on  reasoning auto  metrics off  fa on  kv-unified on
-  6  kv cache     K f16 / V f16
-  7  batching     -np auto  -b 2048  -ub 512
-* 8  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
-  9  template     preserve_thinking=true  enable_thinking=true
- 10  extra args   (none)
+  4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
+  5  penalties    presence 0.0  frequency 0.0  repeat 1.0  repeat-last-n 64
+  6  toggles      jinja on  no-mmproj on  reasoning auto  effort xhigh  fa on  kv-unified on
+  7  kv cache     K f16 / V f16
+  8  batching     -np auto  -b 2048  -ub 512
+* 9  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
+ 10  template     preserve_thinking=true  enable_thinking=true
+ 11  extra args   (none)
 
-  [1-10] edit   [s] save   [c] show command   [Enter] launch   [q] back
+  [1-11] edit   [s] save   [c] show command   [Enter] launch   [q] back
 ```
 
 - `*` marks rows edited but not yet saved.
-- Row 8 shows every shared knob (`n-max`, `n-min`, `p-min`), and additionally `draft ngl`
+- Row 9 shows every shared knob (`n-max`, `n-min`, `p-min`), and additionally `draft ngl`
   when the spec type takes a separate draft model. An earlier draft of this mockup omitted
   `n-min`, contradicting §5 which lists it as a real setting: a setting the user can edit
   must be one the user can see, so the mockup was wrong, not the board.

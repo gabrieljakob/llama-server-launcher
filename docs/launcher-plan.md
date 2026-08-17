@@ -75,11 +75,12 @@ from launcher import catalog
 
 
 class TestCatalogShape(unittest.TestCase):
-    def test_ten_groups_in_board_order(self):
+    def test_groups_are_in_board_order(self):
         labels = [g.label for g in catalog.GROUPS]
         self.assertEqual(labels, [
-            "context", "gpu layers", "host:port", "sampling", "toggles",
-            "kv cache", "batching", "speculative", "template", "extra args",
+            "context", "gpu layers", "host:port", "sampling", "penalties",
+            "toggles", "kv cache", "batching", "speculative", "template",
+            "extra args",
         ])
 
     def test_every_setting_key_is_unique(self):
@@ -284,7 +285,17 @@ GROUPS = [
         Setting("top_k", "--top-k", "top-k", "int", 20, lo=0),
         Setting("top_p", "--top-p", "top-p", "float", 0.95, lo=0, hi=1),
         Setting("min_p", "--min-p", "min-p", "float", 0.0, lo=0, hi=1),
+    ]),
+    # Their own row rather than four more fields on sampling: eight values on one
+    # line stops being readable, and these four are one concept.
+    Group("penalties", "penalties", [
         Setting("presence_penalty", "--presence-penalty", "presence", "float", 0.0),
+        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", 0.0),
+        # 1.0 disables. Not 0.0 - this one is a multiplier, unlike its neighbours.
+        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", 1.0, lo=0),
+        # lo=0 because 0 disables and the binary REJECTS -1, unlike some older
+        # llama.cpp builds where -1 meant "the whole context".
+        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", 64, lo=0),
     ]),
     Group("toggles", "toggles", [
         Setting("jinja", "--jinja", "jinja", "bool", True),
@@ -1793,6 +1804,14 @@ class TestRenderGroup(unittest.TestCase):
         for token in ("temp 0.6", "top-k 20", "top-p 0.95"):
             self.assertIn(token, text)
 
+    def test_penalties_row_shows_all_four(self):
+        """repeat defaults to 1.0, not 0.0 - it is a multiplier where 1.0 is the
+        no-op, unlike presence and frequency where 0.0 is."""
+        text = board.render_group(self.group("penalties"), self.values())
+        for token in ("presence 0.0", "frequency 0.0",
+                      "repeat 1.0", "repeat-last-n 64"):
+            self.assertIn(token, text)
+
     def test_toggles_render_on_and_off(self):
         text = board.render_group(self.group("toggles"),
                                   self.values(jinja=True, metrics=False))
@@ -1864,15 +1883,21 @@ class TestRenderBoard(unittest.TestCase):
         """The numbered rows, in order, without the header or footer."""
         return [l for l in text.splitlines() if l[1:3].strip().isdigit()]
 
-    def test_rows_are_numbered_one_to_ten_in_catalog_order(self):
+    def test_rows_are_numbered_in_catalog_order(self):
         """Ordering matters: the number the user types is an index into GROUPS,
-        so a reordered board would edit the wrong row."""
+        so a reordered board would edit the wrong row. Counted against GROUPS
+        rather than a literal, so adding a row does not falsify this test."""
         text = board.render_board(catalog.catalog_defaults(), set(), "hdr")
         rows = self.rows(text)
-        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(rows), len(catalog.GROUPS))
         for i, (row, group) in enumerate(zip(rows, catalog.GROUPS), 1):
             self.assertIn(f"{i:>2}  ", row)
             self.assertIn(group.label, row)
+
+    def test_the_footer_names_the_real_row_range(self):
+        """A hardcoded [1-10] would silently lie once a row is added."""
+        text = board.render_board(catalog.catalog_defaults(), set(), "hdr")
+        self.assertIn(f"[1-{len(catalog.GROUPS)}] edit", text)
 
     def test_dirty_rows_are_starred(self):
         text = board.render_board(catalog.catalog_defaults(), {"batching"}, "hdr")
@@ -2004,8 +2029,10 @@ def render_board(values, dirty, header):
     for i, group in enumerate(catalog.GROUPS, 1):
         mark = "*" if group.key in dirty else " "
         lines.append(f"{mark}{i:>2}  {group.label:<12} {render_group(group, values)}")
-    lines += ["", "  [1-10] edit   [s] save   [c] show command   "
-                  "[Enter] launch   [q] back"]
+    # Derived, not hardcoded: a hardcoded "[1-10]" silently lies the moment a
+    # row is added, and the whole point of the catalog is that rows can be added.
+    lines += ["", f"  [1-{len(catalog.GROUPS)}] edit   [s] save   [c] show command   "
+                  f"[Enter] launch   [q] back"]
     return "\n".join(lines)
 
 
