@@ -132,6 +132,34 @@ class TestRenderBoard(unittest.TestCase):
         self.assertIn("batching", starred[0])
 
 
+class TestAsPowerShell(unittest.TestCase):
+    """The [c] command must paste into PowerShell 5.1 and run. Every expectation
+    here was checked against the real llama-server: the plain single-quoted form
+    is REJECTED because PowerShell strips embedded double quotes before a native
+    command sees them, and the backslash-inside-single-quotes form is accepted."""
+
+    def test_plain_arguments_are_left_bare(self):
+        self.assertEqual(board.as_powershell(["a.exe", "--temp", "0.6"]),
+                         "& a.exe --temp 0.6")
+
+    def test_paths_with_spaces_are_single_quoted(self):
+        out = board.as_powershell(["a.exe", r"D:\LLM Models\x.gguf"])
+        self.assertIn(r"'D:\LLM Models\x.gguf'", out)
+
+    def test_json_gets_both_layers_of_quoting(self):
+        """Single quotes alone are not enough - that form was rejected by the
+        binary because PowerShell ate the inner double quotes."""
+        out = board.as_powershell(["a.exe", '{"preserve_thinking":true}'])
+        self.assertIn(r"""'{\"preserve_thinking\":true}'""", out)
+
+    def test_a_literal_single_quote_is_doubled(self):
+        out = board.as_powershell(["a.exe", "it's"])
+        self.assertIn("'it''s'", out)
+
+    def test_the_call_operator_is_present(self):
+        self.assertTrue(board.as_powershell(["a.exe"]).startswith("& "))
+
+
 class TestRenderMenu(unittest.TestCase):
     CONFIGS = [{"name": "qwen3.6", "model": "Qwen3.6/q.gguf"},
                {"name": "gemma4", "model": "unsloth/g.gguf"}]

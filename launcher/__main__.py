@@ -160,7 +160,7 @@ def run_board(data, cfg):
                      if values.get("draft_model") else None)
             argv = [data["llama_server"]] + catalog.build_argv(
                 values, model_path, cfg.get("alias") or cfg["name"], draft)
-            print("\n" + subprocess.list2cmdline(argv) + "\n")
+            print("\n" + board.as_powershell(argv) + "\n")
             continue
         if action == "save":
             cfg["settings"] = config.diff_from_defaults(data, values)

@@ -293,17 +293,16 @@ class TestAnchorCommands(unittest.TestCase):
     def test_qwen38_preserve_thinking_coding(self):
         v = catalog.catalog_defaults()
         v.update({"temp": 0.6, "presence_penalty": 0.0, "kv_unified": "on",
-                  "reasoning_effort": "xhigh", "spec_type": "draft-mtp", "spec_n_max": 3,
-                  "spec_p_min": 0.75,
-                  "chat_template_kwargs": {"preserve_thinking": True,
-                                           "enable_thinking": True}})
+                  "reasoning": "on", "reasoning_effort": "xhigh", "spec_type": "draft-mtp",
+                  "spec_n_max": 3, "spec_p_min": 0.75,
+                  "chat_template_kwargs": {"preserve_thinking": True}})
         argv = catalog.build_argv(v, "qwen.gguf", "qwen3.8")
         self.assertPairsPresent(argv, [
             ("--spec-type", "draft-mtp"), ("--spec-draft-n-max", "3"),
             ("--spec-draft-p-min", "0.75"), ("--temp", "0.6"),
-            ("--presence-penalty", "0.0"), ("--reasoning-effort", "xhigh"),
-            ("--chat-template-kwargs",
-             '{"preserve_thinking":true,"enable_thinking":true}'),
+            ("--presence-penalty", "0.0"), ("--reasoning", "on"),
+            ("--reasoning-effort", "xhigh"),
+            ("--chat-template-kwargs", '{"preserve_thinking":true}'),
         ])
         self.assertIn("--kv-unified", argv)
         self.assertNotIn("--spec-draft-model", argv)

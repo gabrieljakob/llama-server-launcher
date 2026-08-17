@@ -91,6 +91,40 @@ def _size_label(size):
     return f"{size / 1024 ** 3:>5.1f} GB"
 
 
+_PS_SPECIAL = " \t\"'`$&|<>(){}[];,@#"
+
+
+def _ps_quote(arg):
+    """Quote one argument for Windows PowerShell 5.1 invoking a native exe.
+
+    TWO layers, both required. Verified empirically against llama-server:
+
+      '{"k":true}'     REJECTED - PowerShell 5.1 strips embedded double quotes
+                       when handing a string to a native command, so the binary
+                       receives {k:true} and its JSON parser refuses it.
+      "{\\"k\\":true}"   REJECTED - double-quoted strings interpolate.
+      '{\\"k\\":true}'   WORKS - the backslashes let the receiving C runtime
+                       recover the quotes, and the single quotes stop PowerShell
+                       touching the backslashes on the way through.
+
+    subprocess.list2cmdline is NOT used here: it emits the CreateProcess
+    convention, which cmd.exe and Popen understand but PowerShell mangles. The
+    actual launch is unaffected either way - spawn() passes argv as a list and
+    never builds a command string - this function exists purely so the command
+    shown by [c] can be pasted into the shell this user actually works in."""
+    if arg and not any(c in arg for c in _PS_SPECIAL):
+        return arg
+    return "'" + arg.replace('"', '\\"').replace("'", "''") + "'"
+
+
+def as_powershell(argv):
+    """argv -> a PowerShell command line that can be pasted and run.
+
+    The leading & is PowerShell's call operator, needed whenever the executable
+    path is quoted and harmless when it is not."""
+    return "& " + " ".join(_ps_quote(a) for a in argv)
+
+
 def dispatch(key):
     key = (key or "").strip().lower()
     if key == "":
