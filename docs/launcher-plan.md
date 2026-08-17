@@ -19,7 +19,9 @@
 - **No git in this project.** Where the standard workflow says "commit," this plan says "run the full suite." Each task still ends with a green gate.
 - **Test command, run from `C:\Users\Gabe\Desktop\Scripts`:**
   `python -m unittest discover -s tests -t . -v`
-- **Never launch a real llama-server in a test.** Tests use fixture strings and fake callables. A 20 GB model load is not a unit test.
+- **Never launch a real llama-server in a test**, and never start a real child process. Tests use fixture strings and injected fakes. A 20 GB model load is not a unit test.
+
+  What this forbids is *slow, flaky, or external*: real servers, real processes, real waits, real network. It does NOT forbid a loopback socket the test itself binds and closes — that is instant, deterministic, involves no network stack beyond `127.0.0.1`, and is the only honest way to test `port_open`. Prefer an injected fake where one is natural; use a self-managed loopback socket where a fake would only test the fake.
 - **Every string *we author* must be ASCII.** This is a German Windows install and the console encoding is **cp1252, not UTF-8**. A character outside cp1252 reaching `print()` raises `UnicodeEncodeError` and kills the launcher. Verified, not theoretical — an infinity sign in one bounds message crashed it.
 
   The rule applies to **literals in our source**: prompts, error messages, labels, report text. Write those in ASCII.
@@ -1560,7 +1562,8 @@ Expected: `None` while nothing is running. Then confirm the localised-status han
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_server.py`:
+Append to `tests/test_server.py`. Add `import socket`, `import subprocess` and `import sys`
+to the top of the file first — the new socket and spawn tests need them:
 
 ```python
 class FakeProc:
@@ -1584,15 +1587,32 @@ class TestWaitReady(unittest.TestCase):
                                     timeout=5, tick=lambda: None,
                                     probe=lambda h, p: next(opens),
                                     sleep=lambda s: None)
-        self.assertTrue(ok)
+        # assertIs, not assertTrue: a swapped return of (msg, ok) would make ok a
+        # non-empty string, which assertTrue accepts. And the message is checked
+        # because callers print it - a wrong tuple order would print "-> True".
+        self.assertIs(ok, True)
+        self.assertEqual(msg, "http://127.0.0.1:8080")
+
+    def test_tick_is_called_while_waiting(self):
+        """Without this, deleting the tick call ships silently - and the user
+        watches a frozen screen for the minutes a 20 GB model takes to load,
+        with no way to tell it apart from a hang."""
+        ticks = []
+        opens = iter([False, False, True])
+        server.wait_ready("127.0.0.1", 8080, FakeProc(),
+                          timeout=5, tick=lambda: ticks.append(1),
+                          probe=lambda h, p: next(opens),
+                          sleep=lambda s: None)
+        self.assertEqual(len(ticks), 2)      # two waits before the third probe
 
     def test_reports_failure_when_the_process_dies(self):
         ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(dies_after=2),
                                     timeout=5, tick=lambda: None,
                                     probe=lambda h, p: False,
                                     sleep=lambda s: None)
-        self.assertFalse(ok)
+        self.assertIs(ok, False)
         self.assertIn("exited", msg)
+        self.assertIn("1", msg)              # the child's return code
 
     def test_reports_failure_on_timeout(self):
         clock = iter([0, 1, 2, 3, 999])
@@ -1601,8 +1621,55 @@ class TestWaitReady(unittest.TestCase):
                                     probe=lambda h, p: False,
                                     sleep=lambda s: None,
                                     clock=lambda: next(clock))
-        self.assertFalse(ok)
+        self.assertIs(ok, False)
         self.assertIn("timed out", msg)
+
+
+class TestPortOpen(unittest.TestCase):
+    """Uses a loopback socket the test binds and closes itself: instant,
+    deterministic, no network. A fake here would only test the fake."""
+
+    def free_port(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_true_when_something_is_listening(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        self.assertTrue(server.port_open("127.0.0.1", srv.getsockname()[1]))
+
+    def test_false_when_nothing_is_listening(self):
+        self.assertFalse(server.port_open("127.0.0.1", self.free_port()))
+
+
+class TestSpawn(unittest.TestCase):
+    """popen is injected: the platform guard and argument handling are worth
+    testing, starting a real console window is not."""
+
+    def test_passes_argv_as_a_list_and_never_uses_a_shell(self):
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            seen["argv"] = argv
+            seen["kwargs"] = kwargs
+            return "proc"
+
+        result = server.spawn(["a.exe", "--flag", "value with spaces"],
+                              popen=fake_popen)
+        self.assertEqual(result, "proc")
+        self.assertEqual(seen["argv"], ["a.exe", "--flag", "value with spaces"])
+        self.assertNotIn("shell", seen["kwargs"])
+
+    def test_requests_its_own_console_on_windows(self):
+        seen = {}
+        server.spawn(["a.exe"], popen=lambda argv, **kw: seen.update(kw))
+        expected = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+        self.assertEqual(seen["creationflags"], expected)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1652,9 +1719,13 @@ def wait_ready(host, port, proc, timeout=300, tick=None,
         sleep(0.5)
 
 
-def spawn(argv):
+def spawn(argv, popen=subprocess.Popen):
+    """Start llama-server in its own console window.
+
+    `popen` is injectable so the platform guard and argument handling can be
+    tested without actually starting a process."""
     flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-    return subprocess.Popen(argv, creationflags=flags)
+    return popen(argv, creationflags=flags)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
