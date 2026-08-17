@@ -180,11 +180,7 @@ things, and the draft model is not a plain yes/no:
 | `draft-mtp` | **optional** | `--spec-type`, shared knobs, plus `--spec-draft-model` and `--spec-draft-ngl` once a path is set |
 | `ngram-*` | not used | `--spec-type`, shared knobs |
 
-`draft-mtp` is the awkward one, and it is worth being precise about why. It normally needs a
-separate draft GGUF like any other `draft-*` type. It runs *without* one only when the
-multi-token-prediction head is built into the model's own weights — and that is a property of the
-**weights**, not of the type string. Nothing in the config distinguishes the two cases, so the
-launcher does not guess: the draft-model row is always offered and never demanded. Set a path and
+The draft-model row is always offered and never demanded. Set a path and
 it is sent, and checked for existence before launch; leave it blank and no flag is emitted.
 
 The launcher validates the required types before launching rather than letting the server fail,
@@ -217,15 +213,15 @@ python -m unittest discover -s tests -t . -v
 
 <br>
 
-They were built under a rule worth repeating: **a passing suite is weak evidence.**
+I wrote them under one rule: **a passing suite is weak evidence.**
 
-Nine separate times during development a test was found that could not fail — it asserted the
-outcome the author expected rather than the mechanism the behaviour depended on. Every one was
-caught by deliberately breaking the source and checking whether anything complained, and none by
-reading.
+Nine times while building this I found a test that could not fail. It asserted the outcome I
+expected instead of the mechanism the behaviour actually depended on. I caught every one of them
+by breaking the source on purpose and watching whether anything complained. Reading the tests
+never caught a single one.
 
-Roughly 800 such mutations were run against this code. The tests that remain are the ones that
-failed when their behaviour was removed.
+I ran roughly 800 of those mutations against this code. The tests still here are the ones that
+failed when I took their behaviour away.
 
 </details>
 
@@ -244,8 +240,8 @@ docs/           design spec and implementation plan
 
 `catalog` and `config` are pure. `server` is the only module that touches processes.
 
-Adding a new llama-server flag is **one record in `catalog.py`** — the consumers iterate the
-catalog generically, which has been verified by doing it.
+Adding a new llama-server flag is **one record in `catalog.py`**. The consumers iterate the
+catalog generically, and I know that holds because I added one and nothing else needed touching.
 
 ## Porting
 
@@ -261,7 +257,7 @@ platform, and device detection asks the binary.
 ## Windows and locale notes
 
 <details>
-<summary><b>Five things learned the hard way on a non-English Windows</b></summary>
+<summary><b>Five things I learned the hard way on a non-English Windows</b></summary>
 
 <br>
 
