@@ -146,5 +146,100 @@ class TestRenderMenu(unittest.TestCase):
         self.assertNotIn("GB", self.line_for(text, "gemma4"))
 
 
+class TestDispatch(unittest.TestCase):
+    def test_digits_select_a_row(self):
+        self.assertEqual(board.dispatch("7"), "edit:7")
+        self.assertEqual(board.dispatch("10"), "edit:10")
+
+    def test_out_of_range_digits_are_unknown(self):
+        self.assertEqual(board.dispatch("11"), "unknown")
+        self.assertEqual(board.dispatch("0"), "unknown")
+
+    def test_letters_map_to_actions(self):
+        self.assertEqual(board.dispatch("s"), "save")
+        self.assertEqual(board.dispatch("c"), "command")
+        self.assertEqual(board.dispatch("q"), "quit")
+
+    def test_blank_launches(self):
+        self.assertEqual(board.dispatch(""), "launch")
+
+    def test_input_is_case_insensitive_and_trimmed(self):
+        self.assertEqual(board.dispatch("  S  "), "save")
+
+
+class TestEditGroup(unittest.TestCase):
+    def group(self, key):
+        return next(g for g in catalog.GROUPS if g.key == key)
+
+    def values(self, **over):
+        v = catalog.catalog_defaults()
+        v.update(over)
+        return v
+
+    def scripted(self, answers):
+        it = iter(answers)
+        return lambda prompt: next(it)
+
+    def test_blank_answer_keeps_the_current_value(self):
+        out = board.edit_group(self.group("context"), self.values(context=8192),
+                               self.scripted([""]), lambda t: None)
+        self.assertEqual(out["context"], 8192)
+
+    def test_valid_answer_is_stored_typed(self):
+        out = board.edit_group(self.group("context"), self.values(),
+                               self.scripted(["32768"]), lambda t: None)
+        self.assertEqual(out["context"], 32768)
+
+    def test_invalid_answer_reprompts_rather_than_raising(self):
+        said = []
+        out = board.edit_group(self.group("context"), self.values(),
+                               self.scripted(["nonsense", "4096"]), said.append)
+        self.assertEqual(out["context"], 4096)
+        self.assertTrue(any("whole number" in s for s in said))
+
+    def test_editing_a_multi_setting_row_walks_each(self):
+        out = board.edit_group(self.group("net"), self.values(),
+                               self.scripted(["0.0.0.0", "8082"]), lambda t: None)
+        self.assertEqual(out["host"], "0.0.0.0")
+        self.assertEqual(out["port"], 8082)
+
+    def test_spec_type_is_always_editable_from_none(self):
+        """Regression: row 8 must be reachable. 'none' is the default, and if the
+        prompt loop used emission gating it would skip spec_type itself, leaving
+        no path from 'none' to any speculative mode."""
+        asked = []
+
+        def ask(prompt):
+            asked.append(prompt)
+            return "draft-mtp" if len(asked) == 1 else ""
+
+        out = board.edit_group(self.group("spec"), self.values(), ask, lambda t: None)
+        self.assertTrue(asked, "spec_type was never prompted for")
+        self.assertEqual(out["spec_type"], "draft-mtp")
+
+    def test_spec_none_skips_the_remaining_prompts(self):
+        """spec_type is asked and answered; the rest of the row is then skipped,
+        so a second scripted answer would be left unconsumed."""
+        answers = iter(["none", "UNREACHABLE"])
+        consumed = []
+
+        def ask(prompt):
+            value = next(answers)
+            consumed.append(value)
+            return value
+
+        out = board.edit_group(self.group("spec"), self.values(), ask, lambda t: None)
+        self.assertEqual(consumed, ["none"])
+        self.assertEqual(out["spec_type"], "none")
+
+    def test_mtp_skips_the_draft_model_prompt(self):
+        out = board.edit_group(self.group("spec"), self.values(),
+                               self.scripted(["draft-mtp", "3", "0", "0.75"]),
+                               lambda t: None)
+        self.assertEqual(out["spec_type"], "draft-mtp")
+        self.assertEqual(out["spec_p_min"], 0.75)
+        self.assertIsNone(out["draft_model"])
+
+
 if __name__ == "__main__":
     unittest.main()

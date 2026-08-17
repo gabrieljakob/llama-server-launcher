@@ -84,6 +84,52 @@ def _size_label(size):
     return f"{size / 1024 ** 3:>5.1f} GB"
 
 
+def dispatch(key):
+    key = (key or "").strip().lower()
+    if key == "":
+        return "launch"
+    if key.isdigit():
+        n = int(key)
+        return f"edit:{n}" if 1 <= n <= len(catalog.GROUPS) else "unknown"
+    return {"s": "save", "c": "command", "q": "quit"}.get(key, "unknown")
+
+
+def _prompt_for(setting, current):
+    hint = ""
+    if setting.type == "choice":
+        hint = "  (" + ", ".join(setting.choices) + ")"
+    elif setting.type == "spec_type":
+        hint = "  (" + ", ".join(catalog.SPEC_TYPES) + ")"
+    elif setting.type == "tri":
+        hint = "  (on / off / blank = leave to llama-server)"
+    elif setting.type == "bool":
+        hint = "  (y/n)"
+    shown = "" if current is None else current
+    if setting.type == "json" and isinstance(current, dict):
+        shown = json.dumps(current) if current else ""
+    return f"  {setting.label}{hint} [{shown}]: "
+
+
+def edit_group(group, values, ask, say):
+    """Walk one row's settings. Blank keeps the current value; invalid input
+    re-prompts. `ask` and `say` are injected so this is testable headless."""
+    values = dict(values)
+    for setting in group.settings:
+        # Recomputed per setting: answering spec_type changes what comes after it.
+        if setting.key not in catalog.editable_keys(values):
+            continue
+        while True:
+            answer = ask(_prompt_for(setting, values.get(setting.key)))
+            if (answer or "").strip() == "" and setting.type != "tri":
+                break
+            ok, result = catalog.parse_value(setting, answer)
+            if ok:
+                values[setting.key] = result
+                break
+            say(f"    {result}")
+    return values
+
+
 def render_menu(configs, missing, sizes=None):
     """`sizes` maps config name to file size in bytes. Sizes are shown because
     two of these models exceed the card's VRAM, so the number is decision-
