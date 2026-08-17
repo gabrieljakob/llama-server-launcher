@@ -167,6 +167,34 @@ class TestParseValue(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("xhigh", err)
 
+    def test_float_rejects_nan_and_infinity(self):
+        """nan defeats every bound - nan < lo and nan > hi are BOTH False - so
+        it reached the config file, where json.dump writes a bare NaN that is
+        not valid JSON and no strict parser will read back."""
+        for key, text in [("top_p", "nan"), ("min_p", "NaN"), ("temp", "inf"),
+                          ("spec_p_min", "-inf"), ("temp", "1e999")]:
+            with self.subTest(key=key, text=text):
+                ok, _ = self.parse(key, text)
+                self.assertFalse(ok, f"{key}={text} must be rejected")
+
+    def test_extra_args_keep_windows_backslashes(self):
+        """POSIX shlex ate them: a --lora path became 'D:LLM' plus
+        'Modelsadaptersx.gguf', silently, on the way to a real server."""
+        ok, args = catalog.split_extra('--lora "D:\\LLM Models\\adapters\\x.gguf"')
+        self.assertTrue(ok)
+        self.assertEqual(args, ["--lora", "D:\\LLM Models\\adapters\\x.gguf"])
+
+    def test_extra_args_split_unquoted_input_on_spaces_only(self):
+        ok, args = catalog.split_extra("--chat-template-file D:\\t\\qwen.jinja")
+        self.assertTrue(ok)
+        self.assertEqual(args, ["--chat-template-file", "D:\\t\\qwen.jinja"])
+
+    def test_extra_args_report_an_unbalanced_quote(self):
+        ok, err = catalog.split_extra('--api-key "sk-abc')
+        self.assertFalse(ok)
+        self.assertIn("unbalanced", err)
+        self.assertFalse(self.parse("extra", '--api-key "sk-abc')[0])
+
     def test_a_server_default_setting_can_be_set_and_unset(self):
         """Settings whose catalog default is None are ones we simply do not pass.
         They must be resettable, or a value set once could never be cleared."""
@@ -245,7 +273,7 @@ its allowed values change, update CACHE_TYPES / SPEC_TYPES below.
 """
 import copy
 import json
-import shlex
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -368,6 +396,48 @@ def catalog_defaults():
     return {s.key: copy.deepcopy(s.default) for g in GROUPS for s in g.settings}
 
 
+def split_extra(text):
+    """Split the extra-args row using WINDOWS rules, not POSIX.
+
+    shlex.split is POSIX: it treats backslash as an escape, so
+        --lora D:\\LLM Models\\adapters\\x.gguf
+    became ['--lora', 'D:LLM', 'Modelsadaptersx.gguf'] - silently corrupted and
+    handed to a real server. Every path on this machine has backslashes, and
+    extra-args exists precisely for path-bearing flags like --chat-template-file
+    and --lora, so POSIX rules were wrong for this field in every realistic use.
+
+    Windows rules: backslash is an ordinary character, only " groups, and a
+    doubled "" inside a quoted run is a literal quote. Unbalanced quotes are
+    reported rather than raised - this text comes from a config file that may
+    have been hand-edited.
+
+    Returns (True, [args]) or (False, error)."""
+    args, cur, in_quotes, started = [], [], False, False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            if in_quotes and i + 1 < len(text) and text[i + 1] == '"':
+                cur.append('"')          # "" inside quotes is a literal quote
+                i += 2
+                continue
+            in_quotes = not in_quotes
+            started = True
+        elif c.isspace() and not in_quotes:
+            if started or cur:
+                args.append("".join(cur))
+                cur, started = [], False
+        else:
+            cur.append(c)
+            started = True
+        i += 1
+    if in_quotes:
+        return False, 'unbalanced quote - every " needs a closing one'
+    if started or cur:
+        args.append("".join(cur))
+    return True, args
+
+
 def _range_error(setting, value):
     """Bounds message, or None if the value is in range.
 
@@ -395,11 +465,16 @@ def parse_value(setting, text):
         return True, None
 
     if t == "tri":
-        if text == "":
+        # "-" unsets, NOT blank. Blank means "keep what is there" for every
+        # other type, and the prompt shows the current value in brackets, so
+        # making blank destructive here silently erased a saved setting the
+        # moment anyone pressed Enter through this row. One convention, no
+        # exceptions: blank keeps, "-" clears.
+        if text == "-":
             return True, None
         if text in ("on", "off"):
             return True, text
-        return False, "enter 'on', 'off', or blank to leave unset"
+        return False, "enter 'on', 'off', or '-' to leave it to llama-server"
 
     if t == "bool":
         if text.lower() in ("y", "yes", "true", "on", "1"):
@@ -421,6 +496,12 @@ def parse_value(setting, text):
             value = float(text)
         except ValueError:
             return False, "enter a number"
+        # nan defeats every bound: nan < lo and nan > hi are BOTH False, so a
+        # nan sails past _range_error into the config file - where json.dump
+        # writes a bare NaN, which is not valid JSON and no strict parser will
+        # read back. inf slips through any bound that has no upper limit.
+        if not math.isfinite(value):
+            return False, "enter a finite number"
         err = _range_error(setting, value)
         return (False, err) if err else (True, value)
 
@@ -457,11 +538,8 @@ def parse_value(setting, text):
         return True, value
 
     if t == "raw":
-        try:
-            shlex.split(text)
-        except ValueError as exc:
-            return False, f"unbalanced quoting: {exc}"
-        return True, text
+        ok, result = split_extra(text)
+        return (True, text) if ok else (False, result)
 
     return True, text            # str, path
 ```
@@ -590,6 +668,19 @@ class TestSpecGating(unittest.TestCase):
         argv = catalog.build_argv(v, "m.gguf", "a")
         self.assertNotIn("--spec-draft-model", argv)
         self.assertIn("--spec-type", argv)
+
+    def test_every_draft_model_type_requires_a_draft_model(self):
+        """The final review found draft-simple and draft-eagle3 appeared in NO
+        test: removing either from DRAFT_MODEL_TYPES let a draft-less config
+        launch and the suite stayed green. Cover all four by name."""
+        for spec_type in ("draft-simple", "draft-eagle3", "draft-dflash",
+                          "draft-dspark"):
+            with self.subTest(spec_type=spec_type):
+                err = catalog.spec_error(self.values(spec_type=spec_type))
+                self.assertIsNotNone(err, f"{spec_type} must demand a draft model")
+                self.assertIn("draft model", err)
+                ok = self.values(spec_type=spec_type, draft_model="d.gguf")
+                self.assertIsNone(catalog.spec_error(ok))
 
     def test_none_drops_spec_type_from_emission_but_not_from_editing(self):
         """The two key sets differ by exactly this one key. Without it, row 8
@@ -739,7 +830,12 @@ def emit(setting, value):
         return [setting.flag, json.dumps(value, separators=(",", ":"))]
 
     if t == "raw":
-        return shlex.split(value) if value else []
+        if not value:
+            return []
+        ok, args = split_extra(value)
+        # Unbalanced quoting is rejected at edit time; a hand-edited config can
+        # still carry it, and dropping the row beats raising mid-launch.
+        return args if ok else []
 
     return [setting.flag, str(value)]
 
@@ -1974,6 +2070,16 @@ class TestAsPowerShell(unittest.TestCase):
         out = board.as_powershell(["a.exe", '{"preserve_thinking":true}'])
         self.assertIn(r"""'{\"preserve_thinking\":true}'""", out)
 
+    def test_a_trailing_backslash_does_not_swallow_the_next_argument(self):
+        """A path ending in a backslash escaped our own closing quote and ate
+        every following argument into one. Verified against real PowerShell."""
+        out = board.as_powershell(["a.exe", "D:\\LLM Models\\", "--temp", "0.6"])
+        self.assertTrue(out.endswith("--temp 0.6"))
+
+    def test_backslashes_before_a_quote_are_doubled(self):
+        out = board.as_powershell(["a.exe", '{"p":"C:\\x"}'])
+        self.assertIn('\\\\\\"', out)
+
     def test_a_literal_single_quote_is_doubled(self):
         out = board.as_powershell(["a.exe", "it's"])
         self.assertIn("'it''s'", out)
@@ -2147,7 +2253,25 @@ def _ps_quote(arg):
     shown by [c] can be pasted into the shell this user actually works in."""
     if arg and not any(c in arg for c in _PS_SPECIAL):
         return arg
-    return "'" + arg.replace('"', '\\"').replace("'", "''") + "'"
+    # Any backslash RUN immediately before a quote - or at the very end of the
+    # argument - must be doubled before the quote is escaped. The C runtime that
+    # parses the command line treats \\" as an escaped quote, so a lone trailing
+    # backslash in a path like D:\LLM Models\ would escape the closing quote and
+    # swallow every following argument into this one. Verified: it did.
+    out, run = [], 0
+    for ch in arg:
+        if ch == "\\":
+            run += 1
+            continue
+        if ch == '"':
+            out.append("\\" * (run * 2 + 1))    # double the run, escape the quote
+            out.append('"')
+        else:
+            out.append("\\" * run)
+            out.append(ch)
+        run = 0
+    out.append("\\" * (run * 2))                # trailing run precedes our quote
+    return "'" + "".join(out).replace("'", "''") + "'"
 
 
 def as_powershell(argv):
@@ -2271,6 +2395,24 @@ class TestEditGroup(unittest.TestCase):
         self.assertEqual(out["host"], "0.0.0.0")
         self.assertEqual(out["port"], 8082)
 
+    def test_enter_keeps_a_tri_value_instead_of_erasing_it(self):
+        """The regression that made the final review say "not yet". Blank meant
+        "unset" for tri types only, so pressing Enter through the toggles row
+        destroyed a saved kv_unified - while the prompt showed [on], promising
+        the opposite."""
+        values = self.values(kv_unified="on", reasoning_preserve="off")
+        out = board.edit_group(self.group("toggles"), values,
+                               lambda prompt: "", lambda t: None)
+        self.assertEqual(out["kv_unified"], "on")
+        self.assertEqual(out["reasoning_preserve"], "off")
+
+    def test_a_tri_is_cleared_with_a_dash(self):
+        answers = iter(["", "", "", "", "-", "", "", ""])
+        out = board.edit_group(self.group("toggles"),
+                               self.values(reasoning_preserve="on"),
+                               lambda prompt: next(answers), lambda t: None)
+        self.assertIsNone(out["reasoning_preserve"])
+
     def test_spec_type_is_always_editable_from_none(self):
         """Regression: row 8 must be reachable. 'none' is the default, and if the
         prompt loop used emission gating it would skip spec_type itself, leaving
@@ -2363,7 +2505,7 @@ def _prompt_for(setting, current):
     elif setting.type == "spec_type":
         hint = "  (" + ", ".join(catalog.SPEC_TYPES) + ")"
     elif setting.type == "tri":
-        hint = "  (on / off / blank = leave to llama-server)"
+        hint = "  (on / off / - to leave it to llama-server)"
     elif setting.type == "bool":
         hint = "  (y/n)"
     if setting.default is None and setting.type not in ("tri", "bool"):
@@ -2384,7 +2526,12 @@ def edit_group(group, values, ask, say):
             continue
         while True:
             answer = ask(_prompt_for(setting, values.get(setting.key)))
-            if (answer or "").strip() == "" and setting.type != "tri":
+            # Blank keeps the current value for EVERY type. The tri types used
+            # to be excepted here so blank could mean "unset", but the prompt
+            # shows the current value in brackets and the spec says Enter
+            # accepts - so pressing Enter through this row wiped saved settings.
+            # Clearing is "-", uniformly.
+            if (answer or "").strip() == "":
                 break
             ok, result = catalog.parse_value(setting, answer)
             if ok:
@@ -2515,10 +2662,12 @@ def vram_line():
 
 
 def launch(data, cfg, values):
+    """Returns True only if a server is actually up. Every failure path returns
+    False so run_board can keep the board - and the user's unsaved edits - up."""
     err = catalog.spec_error(values)
     if err:
         print(f"\n  cannot launch: {err}\n")
-        return
+        return False
 
     root = data["model_root"]
     model_path = config.resolve_path(cfg["model"], root)
@@ -2527,12 +2676,12 @@ def launch(data, cfg, values):
     # inside spawn does not.
     if not os.path.exists(model_path):
         print(f"\n  cannot launch: model file is gone - {model_path}\n")
-        return
+        return False
     draft_path = (config.resolve_path(values["draft_model"], root)
                   if values.get("draft_model") else None)
     if draft_path and not os.path.exists(draft_path):
         print(f"\n  cannot launch: draft model is gone - {draft_path}\n")
-        return
+        return False
     argv = [data["llama_server"]] + catalog.build_argv(
         values, model_path, cfg.get("alias") or cfg["name"], draft_path)
 
@@ -2543,7 +2692,7 @@ def launch(data, cfg, values):
         if "llama-server" not in name.lower():
             print(f"\n  port {port} is held by {name} (pid {pid}), not a "
                   f"llama-server. Change the port on row 3.\n")
-            return
+            return False
         if ask(f"  port {port} is held by llama-server (pid {pid}). "
                f"Stop it? [Y/n] ").strip().lower() in ("", "y"):
             # expect_name re-checks identity at kill time. The snapshot above is
@@ -2553,10 +2702,10 @@ def launch(data, cfg, values):
             if not server.kill(pid, expect_name=name):
                 print(f"  pid {pid} is no longer {name} - not killing it. "
                       f"Re-check the port and try again.")
-                return
+                return False
             print(f"  stopped pid {pid}")
         else:
-            return
+            return False
 
     print(f"\n  starting {cfg['name']} ...")
     proc = server.spawn(argv)
@@ -2564,6 +2713,7 @@ def launch(data, cfg, values):
                                                                     flush=True))
     print()
     print(f"  -> {msg}  (pid {proc.pid})" if ok else f"  FAILED: {msg}")
+    return ok
 
 
 def run_board(data, cfg):
@@ -2580,8 +2730,12 @@ def run_board(data, cfg):
         if action == "quit":
             return
         if action == "launch":
-            launch(data, cfg, values)
-            return
+            # Only leave the board on success. Returning unconditionally threw
+            # away every unsaved edit the moment a port was busy or a file had
+            # moved - the user retypes their work to find out why it failed.
+            if launch(data, cfg, values):
+                return
+            continue
         if action == "command":
             model_path = config.resolve_path(cfg["model"], root)
             draft = (config.resolve_path(values["draft_model"], root)
@@ -2592,6 +2746,13 @@ def run_board(data, cfg):
             continue
         if action == "save":
             cfg["settings"] = config.diff_from_defaults(data, values)
+            if not any(c is cfg for c in data["configs"]):
+                # A config made with [n] joins the document only when it is
+                # actually saved - the spec says "written on [s]". Appending it
+                # at creation meant an unrelated later save persisted a config
+                # the user had opened and walked away from. Identity, not
+                # equality: two configs can compare equal.
+                data["configs"].append(cfg)
             config.save(CONFIG_PATH, data)
             dirty.clear()
             print(f"  saved to {os.path.basename(CONFIG_PATH)}")
@@ -2614,20 +2775,26 @@ def new_config(data):
     for i, path in enumerate(models, 1):
         print(f"  {i:>2}  {os.path.relpath(path, data['model_root'])}")
     try:
-        chosen = models[int(ask("\n  model number: ").strip()) - 1]
-    except (ValueError, IndexError):
+        index = int(ask("\n  model number: ").strip())
+    except ValueError:
         print("  invalid selection")
         return None
+    # Explicit lower bound: Python indexes from the end for 0 and negatives, so
+    # "0" silently picked the LAST scanned file - which on this disk is a draft
+    # model, not something you can launch.
+    if not 1 <= index <= len(models):
+        print("  invalid selection")
+        return None
+    chosen = models[index - 1]
+
     name = ask("  config name: ").strip()
     if not name:
         return None
     if any(c["name"] == name for c in data["configs"]):
         print(f"  a config named {name!r} already exists")
         return None
-    cfg = {"name": name, "alias": name,
-           "model": config.relativise(chosen, data["model_root"]), "settings": {}}
-    data["configs"].append(cfg)
-    return cfg
+    return {"name": name, "alias": name,
+            "model": config.relativise(chosen, data["model_root"]), "settings": {}}
 
 
 def main():
@@ -2673,10 +2840,16 @@ def _main():
                 run_board(data, cfg)
             continue
         try:
-            cfg = data["configs"][int(choice) - 1]
-        except (ValueError, IndexError):
+            index = int(choice)
+        except ValueError:
             print("  invalid selection")
             continue
+        # Explicit lower bound: Python indexes from the end for 0 and negatives,
+        # so "0" silently opened the LAST config and "-1" the second-to-last.
+        if not 1 <= index <= len(data["configs"]):
+            print("  invalid selection")
+            continue
+        cfg = data["configs"][index - 1]
         if cfg["name"] in missing:
             print(f"  {cfg['name']} cannot launch: model file is missing")
             continue
