@@ -77,5 +77,60 @@ class TestLoad(unittest.TestCase):
         self.assertIn("line", str(ctx.exception))
 
 
+class TestMigration(unittest.TestCase):
+    ROOT = "D:/LLM Models"
+    EXE = "D:/llama.cpp/llama-server.exe"
+
+    PROFILES = {
+        "defaults": {"ngl": 99, "context": 8192, "host": "127.0.0.1",
+                     "port": 8080, "temp": 0.6, "top_k": 20, "top_p": 0.95,
+                     "min_p": 0.0, "flash_attn": True},
+        "models": [
+            {"name": "Qwen3.6-35B", "alias": "qwen3.6",
+             "path": "D:/LLM Models/Qwen3.6/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+             "overrides": {"context": 8192, "temp": 0.6}},
+            {"name": "dspark", "alias": "dspark",
+             "path": "D:/LLM Models/ankk98/dspark-gemma/dspark_gemma4_12b_q4pure.gguf",
+             "overrides": {"context": 4096}},
+        ],
+    }
+
+    def migrate(self):
+        return config.migrate(self.PROFILES, self.ROOT, self.EXE)
+
+    def test_ngl_is_renamed_to_gpu_layers(self):
+        doc, _ = self.migrate()
+        self.assertEqual(doc["defaults"]["gpu_layers"], "99")
+        self.assertNotIn("ngl", doc["defaults"])
+
+    def test_flash_attn_true_becomes_on(self):
+        doc, _ = self.migrate()
+        self.assertEqual(doc["defaults"]["flash_attn"], "on")
+
+    def test_each_model_becomes_a_config_keyed_by_alias(self):
+        doc, _ = self.migrate()
+        self.assertEqual([c["name"] for c in doc["configs"]], ["qwen3.6", "dspark"])
+
+    def test_model_paths_are_relativised(self):
+        doc, _ = self.migrate()
+        self.assertEqual(doc["configs"][0]["model"],
+                         "Qwen3.6/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")
+
+    def test_overrides_carry_across(self):
+        doc, _ = self.migrate()
+        self.assertEqual(doc["configs"][0]["settings"]["context"], 8192)
+
+    def test_version_and_roots_are_written(self):
+        doc, _ = self.migrate()
+        self.assertEqual(doc["version"], 2)
+        self.assertEqual(doc["model_root"], self.ROOT)
+        self.assertEqual(doc["llama_server"], self.EXE)
+
+    def test_report_flags_dspark_as_probably_a_draft_model(self):
+        _, report = self.migrate()
+        self.assertTrue(any("dspark" in line and "draft" in line.lower()
+                            for line in report))
+
+
 if __name__ == "__main__":
     unittest.main()
