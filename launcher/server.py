@@ -1,8 +1,5 @@
 """Process and port handling. The only module that touches running processes."""
-import socket
 import subprocess
-import sys
-import time
 
 
 def parse_netstat(text, port):
@@ -23,16 +20,29 @@ def parse_netstat(text, port):
     return None
 
 
+def parse_tasklist(text):
+    """Image name from `tasklist /FO CSV /NH` output, or "" if no such process.
+
+    Detection is by the absence of a CSV row, not by wording or exit code:
+    tasklist exits 0 for a no-match and prints a localised INFORMATION line."""
+    first = text.strip().splitlines()[0] if text.strip() else ""
+    if first.startswith('"'):
+        return first.split('","')[0].strip('"')
+    return ""
+
+
 def process_name(pid):
+    """Image name for `pid`.
+
+    Three distinct answers: the name; "" if no such process (it exited, so there
+    is nothing to kill); "unknown" if tasklist itself could not be run (we do not
+    know, and must not assume)."""
     try:
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    first = out.strip().splitlines()[0] if out.strip() else ""
-    if first.startswith('"'):
-        return first.split('","')[0].strip('"')
-    return "unknown"
+    return parse_tasklist(out)
 
 
 def port_owner(port):
@@ -45,10 +55,27 @@ def port_owner(port):
     pid = parse_netstat(out, port)
     if pid is None:
         return None
-    return pid, process_name(pid)
+    name = process_name(pid)
+    if name == "":
+        return None            # the listener exited between netstat and tasklist
+    return pid, name
 
 
-def kill(pid):
+def kill(pid, expect_name=None, name_of=process_name):
+    """Force-stop `pid`. Returns True only if it was actually killed.
+
+    `expect_name` re-verifies identity immediately before killing, and callers
+    that got their pid from port_owner should always pass it. That snapshot can
+    be minutes old by the time a user answers a confirmation prompt; if the
+    server exited in the meantime and Windows recycled its pid, killing blind
+    would terminate an unrelated process. Refuses on a mismatch, on "" (already
+    gone) and on "unknown" (tasklist failed) - not knowing is not permission.
+
+    `name_of` is injectable so the guard is testable without spawning anything."""
+    if expect_name is not None:
+        current = name_of(pid)
+        if not current or current.lower() != expect_name.lower():
+            return False
     try:
         r = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
                            capture_output=True, text=True, timeout=20)
