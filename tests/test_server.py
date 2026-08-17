@@ -82,23 +82,53 @@ class TestParseTasklist(unittest.TestCase):
 class TestKillGuard(unittest.TestCase):
     """kill() force-terminates a real process. port_owner's snapshot can be
     minutes old by the time a user answers a prompt, and Windows recycles PIDs -
-    so identity is re-checked immediately before the kill."""
+    so identity is re-checked immediately before the kill.
+
+    Every test here injects both `name_of` and `force`, so nothing real dies."""
+
+    def kill(self, reported, expect="llama-server.exe"):
+        """Returns (result, pids actually passed to the killer)."""
+        killed = []
+        result = server.kill(4321, expect_name=expect,
+                             name_of=lambda pid: reported,
+                             force=lambda pid: killed.append(pid) or True)
+        return result, killed
+
+    def test_proceeds_when_the_name_matches(self):
+        """The positive path. Without this, a regression to 'always refuse'
+        would pass every other test in this class while making the launcher
+        permanently unable to take a busy port."""
+        result, killed = self.kill("llama-server.exe")
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
+
+    def test_match_is_case_insensitive(self):
+        result, killed = self.kill("LLAMA-SERVER.EXE")
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
 
     def test_refuses_when_the_name_no_longer_matches(self):
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "notepad.exe")
-        self.assertFalse(killed)
+        result, killed = self.kill("notepad.exe")
+        self.assertFalse(result)
+        self.assertEqual(killed, [], "must not have called the killer at all")
 
     def test_refuses_when_the_process_has_vanished(self):
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "")
-        self.assertFalse(killed)
+        result, killed = self.kill("")
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
 
     def test_refuses_when_the_name_is_unknown(self):
         """'unknown' means tasklist itself failed. Not knowing is not permission."""
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "unknown")
-        self.assertFalse(killed)
+        result, killed = self.kill("unknown")
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_expect_name_is_required_and_keyword_only(self):
+        """A default would let a caller silently fall back to unguarded killing."""
+        with self.assertRaises(TypeError):
+            server.kill(4321)
+        with self.assertRaises(TypeError):
+            server.kill(4321, "llama-server.exe")     # positional not allowed
 
 
 if __name__ == "__main__":
