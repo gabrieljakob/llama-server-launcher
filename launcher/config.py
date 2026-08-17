@@ -65,7 +65,9 @@ _MIGRATE_KEYS = {"ngl": "gpu_layers", "context": "context", "host": "host",
 _LIKELY_DRAFT = ("dflash", "dspark")
 
 
-def _migrate_settings(old):
+def _migrate_settings(old, where, report):
+    """Old-format settings -> catalog keys. Unmapped keys are dropped silently;
+    values we cannot interpret are dropped loudly, into `report`."""
     out = {}
     for old_key, value in (old or {}).items():
         key = _MIGRATE_KEYS.get(old_key)
@@ -74,25 +76,49 @@ def _migrate_settings(old):
         if key == "gpu_layers":
             value = str(value)
         elif key == "flash_attn":
-            value = "on" if value is True else ("off" if value is False else value)
+            # The old format wrote a bool. A hand-edited file might hold anything;
+            # guessing an intent would emit an invalid flag value that only fails
+            # much later, at server start, with nothing pointing back to here.
+            if isinstance(value, bool):
+                value = "on" if value else "off"
+            elif value not in ("on", "off", "auto"):
+                report.append(
+                    f"  WARNING: {where} had flash_attn={value!r}, which is neither a "
+                    f"bool nor one of on/off/auto. Dropped; the default applies.")
+                continue
         out[key] = value
     return out
 
 
 def migrate(profiles, model_root, llama_server):
-    """model_profiles.json -> the v2 document. Returns (document, report lines)."""
+    """model_profiles.json -> the v2 document. Returns (document, report lines).
+
+    Never mutates `profiles`, and never touches model_profiles.json on disk: that
+    file is the user's rollback path."""
     report = []
     doc = {"version": 2, "model_root": model_root, "llama_server": llama_server,
-           "defaults": _migrate_settings(profiles.get("defaults")), "configs": []}
+           "defaults": _migrate_settings(profiles.get("defaults"), "defaults", report),
+           "configs": []}
 
-    for entry in profiles.get("models", []):
+    for index, entry in enumerate(profiles.get("models", []), 1):
         name = entry.get("alias") or entry.get("name")
-        model = relativise(entry["path"].replace("/", os.sep), model_root)
+        path = entry.get("path")
+        # A partial or hand-edited entry must not abort the whole migration -
+        # this runs once, on the user's only config, and losing five good
+        # configs to one malformed sixth would be a poor trade.
+        if not path or not name:
+            missing = "path" if not path else "name/alias"
+            report.append(f"  SKIPPED entry {index}: no {missing}. "
+                          f"Other entries were unaffected.")
+            continue
+
+        model = relativise(path.replace("/", os.sep), model_root)
         doc["configs"].append({
             "name": name,
             "model": model,
             "alias": entry.get("alias") or name,
-            "settings": _migrate_settings(entry.get("overrides")),
+            "settings": _migrate_settings(entry.get("overrides"), f"config {name!r}",
+                                          report),
         })
         report.append(f"  migrated config {name!r} -> {model}")
         if any(hint in model.lower() for hint in _LIKELY_DRAFT):

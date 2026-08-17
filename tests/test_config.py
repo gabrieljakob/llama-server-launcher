@@ -131,6 +131,61 @@ class TestMigration(unittest.TestCase):
         self.assertTrue(any("dspark" in line and "draft" in line.lower()
                             for line in report))
 
+    def test_input_profiles_dict_is_not_mutated(self):
+        """The caller may still be holding this dict. Migration reads only."""
+        import copy
+        before = copy.deepcopy(self.PROFILES)
+        self.migrate()
+        self.assertEqual(self.PROFILES, before)
+
+
+class TestMigrationRobustness(unittest.TestCase):
+    """Migration runs once, unattended, against the user's only config file.
+    A partial or hand-edited entry must degrade, not abort."""
+
+    ROOT = "D:/LLM Models"
+    EXE = "D:/llama.cpp/llama-server.exe"
+
+    def migrate(self, profiles):
+        return config.migrate(profiles, self.ROOT, self.EXE)
+
+    def test_entry_without_a_path_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": "good", "alias": "good", "path": "D:/LLM Models/a/b.gguf"},
+            {"name": "broken", "alias": "broken"},
+        ]})
+        self.assertEqual([c["name"] for c in doc["configs"]], ["good"])
+        self.assertTrue(any("SKIPPED" in line and "path" in line for line in report))
+
+    def test_entry_without_a_name_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {},
+                                    "models": [{"path": "D:/LLM Models/a/b.gguf"}]})
+        self.assertEqual(doc["configs"], [])
+        self.assertTrue(any("SKIPPED" in line for line in report))
+
+    def test_uninterpretable_flash_attn_is_dropped_with_a_warning(self):
+        doc, report = self.migrate({"defaults": {"flash_attn": "yes please"},
+                                    "models": []})
+        self.assertNotIn("flash_attn", doc["defaults"])
+        self.assertTrue(any("WARNING" in line and "flash_attn" in line
+                            for line in report))
+
+    def test_an_already_valid_flash_attn_string_passes_through(self):
+        doc, _ = self.migrate({"defaults": {"flash_attn": "auto"}, "models": []})
+        self.assertEqual(doc["defaults"]["flash_attn"], "auto")
+
+    def test_non_ascii_model_name_survives_migration(self):
+        """Model names are user data off the user's disk and may contain
+        anything. migrate() must carry them through verbatim without raising and
+        without mangling them; making them printable is __main__'s job, via its
+        stdout reconfigure. See the Global Constraints note on authored strings
+        versus interpolated user data."""
+        name = "\u4e2d\u6587-model"
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": name, "alias": name, "path": "D:/LLM Models/a/b.gguf"}]})
+        self.assertEqual(doc["configs"][0]["name"], name)
+        self.assertTrue(any(name in line for line in report))
+
 
 if __name__ == "__main__":
     unittest.main()
