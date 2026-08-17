@@ -88,7 +88,12 @@ def dispatch(key):
     key = (key or "").strip().lower()
     if key == "":
         return "launch"
-    if key.isdigit():
+    # isdecimal, NOT isdigit. isdigit() accepts characters int() then rejects -
+    # superscript two is the clearest case: "²".isdigit() is True but
+    # int("²") raises ValueError, crashing the launcher on a pasted
+    # character. isdecimal() still accepts genuine non-ASCII digits such as
+    # Arabic-Indic "٣", which int() converts correctly to 3.
+    if key.isdecimal():
         n = int(key)
         return f"edit:{n}" if 1 <= n <= len(catalog.GROUPS) else "unknown"
     return {"s": "save", "c": "command", "q": "quit"}.get(key, "unknown")
@@ -127,6 +132,16 @@ def edit_group(group, values, ask, say):
                 values[setting.key] = result
                 break
             say(f"    {result}")
+
+    # Switching to a spec type that carries its own prediction head leaves a
+    # stale draft_model behind. editable_keys then hides that row, so the user
+    # cannot reach it - yet spec_error refuses to launch and tells them to
+    # "clear the draft model row". That is an instruction the UI cannot obey.
+    # Clear it here and say so, rather than stranding them.
+    if (group.key == "spec" and values.get("draft_model")
+            and "draft_model" not in catalog.editable_keys(values)):
+        say(f"    cleared the draft model: {values['spec_type']} carries its own")
+        values["draft_model"] = None
     return values
 
 

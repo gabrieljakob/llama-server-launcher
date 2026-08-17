@@ -166,6 +166,24 @@ class TestDispatch(unittest.TestCase):
     def test_input_is_case_insensitive_and_trimmed(self):
         self.assertEqual(board.dispatch("  S  "), "save")
 
+    def test_a_unicode_digit_int_cannot_parse_does_not_crash(self):
+        """Superscript two satisfies str.isdigit() but int() rejects it, so an
+        isdigit() gate crashes the launcher on a pasted character. The
+        constraint is that invalid input never raises - unknown is fine."""
+        self.assertEqual(board.dispatch("²"), "unknown")
+
+    def test_a_real_unicode_digit_still_selects_a_row(self):
+        """Arabic-Indic three is a genuine decimal digit; int() converts it.
+        Narrowing to isdecimal() must not reject it."""
+        self.assertEqual(board.dispatch("٣"), "edit:3")
+
+    def test_no_input_raises(self):
+        """Nothing typed at this prompt may escape as an exception."""
+        for key in ["", "  ", "abc", "-1", "0", "11", "999999999999999999999",
+                    "1.5", "²", "٣", "!", "  Q  ", "\t\n"]:
+            with self.subTest(key=key):
+                self.assertIsInstance(board.dispatch(key), str)
+
 
 class TestEditGroup(unittest.TestCase):
     def group(self, key):
@@ -239,6 +257,30 @@ class TestEditGroup(unittest.TestCase):
         self.assertEqual(out["spec_type"], "draft-mtp")
         self.assertEqual(out["spec_p_min"], 0.75)
         self.assertIsNone(out["draft_model"])
+
+    def test_switching_to_a_built_in_type_clears_a_stale_draft_model(self):
+        """Otherwise the user is stranded: editable_keys hides the draft-model
+        row for draft-mtp, so they cannot clear it, while spec_error refuses to
+        launch and tells them to clear it. The UI must not issue an instruction
+        it gives no way to obey."""
+        said = []
+        out = board.edit_group(
+            self.group("spec"),
+            self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf"),
+            self.scripted(["draft-mtp", "3", "0", "0.0"]), said.append)
+        self.assertEqual(out["spec_type"], "draft-mtp")
+        self.assertIsNone(out["draft_model"])
+        self.assertIsNone(catalog.spec_error(out), "must now be launchable")
+        self.assertTrue(any("cleared the draft model" in s for s in said),
+                        "clearing it silently would be its own surprise")
+
+    def test_a_draft_type_keeps_its_draft_model(self):
+        """The clearing must be specific to types that carry their own head."""
+        out = board.edit_group(
+            self.group("spec"),
+            self.values(spec_type="draft-dflash", draft_model="d/DFlash.gguf"),
+            self.scripted(["draft-dspark", "", "4", "0", "", "0.0"]), lambda t: None)
+        self.assertEqual(out["draft_model"], "d/DFlash.gguf")
 
 
 if __name__ == "__main__":
