@@ -1782,14 +1782,50 @@ class TestRenderGroup(unittest.TestCase):
         text = board.render_group(self.group("toggles"), self.values(kv_unified=None))
         self.assertNotIn("kv-unified", text)
 
-    def test_spec_none_renders_as_none(self):
+    def test_spec_none_renders_as_exactly_none(self):
+        """assertEqual, not assertIn: the generic label formatter would emit
+        'spec-type none' for an unhandled case, which contains 'none' and would
+        satisfy a substring check while showing the user a different thing."""
         text = board.render_group(self.group("spec"), self.values(spec_type="none"))
-        self.assertIn("none", text)
+        self.assertEqual(text, "none")
 
     def test_mtp_is_labelled_built_in(self):
         text = board.render_group(self.group("spec"), self.values(spec_type="draft-mtp"))
         self.assertIn("draft-mtp", text)
         self.assertIn("built-in", text)
+        self.assertNotIn("draft ngl", text)   # meaningless without a draft model
+
+    def test_ngram_types_are_also_labelled_built_in(self):
+        """draft-mtp is not the only draft-model-free type. Testing only it would
+        let a regression to `if spec_type == "draft-mtp"` pass, which is exactly
+        the hardcoding the active_keys call exists to avoid."""
+        for spec_type in ("ngram-mod", "ngram-simple", "ngram-cache"):
+            with self.subTest(spec_type=spec_type):
+                text = board.render_group(self.group("spec"),
+                                          self.values(spec_type=spec_type))
+                self.assertIn("built-in", text)
+
+    def test_a_draft_type_shows_its_model_and_draft_ngl(self):
+        """spec_ngl is editable, so it must be visible - a setting the user can
+        change but cannot see is a trap."""
+        text = board.render_group(self.group("spec"), self.values(
+            spec_type="draft-dflash", draft_model="d/DFlash-Q8_0.gguf",
+            spec_ngl="99"))
+        self.assertIn("DFlash-Q8_0.gguf", text)
+        self.assertIn("draft ngl 99", text)
+        self.assertNotIn("built-in", text)
+
+    def test_parallel_shows_auto_not_the_sentinel(self):
+        """-1 is llama-server's 'choose for me'. Row 2 already prints 'auto' for
+        the same concept; printing '-1' here leaks the sentinel."""
+        text = board.render_group(self.group("batching"), self.values(parallel=-1))
+        self.assertIn("-np auto", text)
+        self.assertNotIn("-1", text)
+
+    def test_parallel_shows_a_real_value_when_set(self):
+        text = board.render_group(self.group("batching"), self.values(parallel=1))
+        self.assertIn("-np 1", text)
+        self.assertNotIn("auto", text)
 
     def test_empty_template_renders_as_none(self):
         text = board.render_group(self.group("template"), self.values())
@@ -1803,10 +1839,19 @@ class TestRenderGroup(unittest.TestCase):
 
 
 class TestRenderBoard(unittest.TestCase):
-    def test_rows_are_numbered_one_to_ten(self):
+    def rows(self, text):
+        """The numbered rows, in order, without the header or footer."""
+        return [l for l in text.splitlines() if l[1:3].strip().isdigit()]
+
+    def test_rows_are_numbered_one_to_ten_in_catalog_order(self):
+        """Ordering matters: the number the user types is an index into GROUPS,
+        so a reordered board would edit the wrong row."""
         text = board.render_board(catalog.catalog_defaults(), set(), "hdr")
-        for n in range(1, 11):
-            self.assertIn(f"{n:>3}  ", text)
+        rows = self.rows(text)
+        self.assertEqual(len(rows), 10)
+        for i, (row, group) in enumerate(zip(rows, catalog.GROUPS), 1):
+            self.assertIn(f"{i:>2}  ", row)
+            self.assertIn(group.label, row)
 
     def test_dirty_rows_are_starred(self):
         text = board.render_board(catalog.catalog_defaults(), {"batching"}, "hdr")
@@ -1819,15 +1864,37 @@ class TestRenderMenu(unittest.TestCase):
     CONFIGS = [{"name": "qwen3.6", "model": "Qwen3.6/q.gguf"},
                {"name": "gemma4", "model": "unsloth/g.gguf"}]
 
+    def line_for(self, text, name):
+        return [l for l in text.splitlines() if name in l][0]
+
     def test_lists_every_config_numbered(self):
         text = board.render_menu(self.CONFIGS, missing=set())
         self.assertIn("1  qwen3.6", text)
         self.assertIn("2  gemma4", text)
 
-    def test_missing_models_are_marked(self):
+    def test_missing_models_are_marked_and_others_are_not(self):
+        """Asserting only that the missing one IS marked would pass an
+        implementation that marks everything."""
         text = board.render_menu(self.CONFIGS, missing={"gemma4"})
-        line = [l for l in text.splitlines() if "gemma4" in l][0]
-        self.assertIn("!missing", line)
+        self.assertIn("!missing", self.line_for(text, "gemma4"))
+        self.assertNotIn("!missing", self.line_for(text, "qwen3.6"))
+
+    def test_nothing_is_marked_when_nothing_is_missing(self):
+        text = board.render_menu(self.CONFIGS, missing=set())
+        self.assertNotIn("!missing", text)
+
+    def test_file_sizes_are_shown_when_known(self):
+        """Two of these models exceed the card's VRAM, so size is decision-
+        relevant on the menu, not decoration."""
+        text = board.render_menu(self.CONFIGS, missing=set(),
+                                 sizes={"qwen3.6": 20_820_000_000})
+        self.assertIn("19.4 GB", self.line_for(text, "qwen3.6"))
+
+    def test_a_config_with_no_known_size_still_renders(self):
+        text = board.render_menu(self.CONFIGS, missing=set(),
+                                 sizes={"qwen3.6": 20_820_000_000})
+        self.assertIn("gemma4", self.line_for(text, "gemma4"))
+        self.assertNotIn("GB", self.line_for(text, "gemma4"))
 
 
 if __name__ == "__main__":
@@ -1852,6 +1919,13 @@ from . import catalog
 def _fmt(setting, value):
     if value is None:
         return None
+    if setting.key == "parallel" and value == -1:
+        # -1 is llama-server's sentinel for "choose a slot count for me". Show
+        # what it means, not the sentinel: gpu_layers already displays "auto"
+        # because its default IS the string "auto", and a board that prints
+        # "auto" on one row and "-1" on another for the same concept is just
+        # leaking an implementation detail. Display only - emit() still sends -1.
+        return f"{setting.label} auto"
     if setting.type == "bool":
         return f"{setting.label} {'on' if value else 'off'}"
     if setting.type == "tri":
@@ -1883,9 +1957,17 @@ def render_group(group, values):
         live = catalog.active_keys(values)
         parts = [types]
         if "draft_model" not in live:
+            # draft-mtp and every ngram-* type: the model carries its own
+            # prediction head. Asking active_keys rather than listing the type
+            # names keeps this from drifting when the catalog gains a type.
             parts.append("(built-in, no draft model)")
-        elif values.get("draft_model"):
-            parts.append(os.path.basename(str(values["draft_model"])))
+        else:
+            if values.get("draft_model"):
+                parts.append(os.path.basename(str(values["draft_model"])))
+            # spec_ngl is only meaningful with a separate draft model, but it IS
+            # editable, and a setting the user can change must be visible.
+            ngl = catalog.settings_by_key()["spec_ngl"]
+            parts.append(f"{ngl.label} {values.get('spec_ngl')}")
         for key in ("spec_n_max", "spec_n_min", "spec_p_min"):
             setting = catalog.settings_by_key()[key]
             parts.append(f"{setting.label} {values.get(key)}")
@@ -1900,18 +1982,30 @@ def render_board(values, dirty, header):
     lines = [header, ""]
     for i, group in enumerate(catalog.GROUPS, 1):
         mark = "*" if group.key in dirty else " "
-        lines.append(f"{mark}{i:>3}  {group.label:<12} {render_group(group, values)}")
+        lines.append(f"{mark}{i:>2}  {group.label:<12} {render_group(group, values)}")
     lines += ["", "  [1-10] edit   [s] save   [c] show command   "
                   "[Enter] launch   [q] back"]
     return "\n".join(lines)
 
 
-def render_menu(configs, missing):
+def _size_label(size):
+    """Human file size, or blank padding when the size is unknown."""
+    if not size:
+        return " " * 8
+    return f"{size / 1024 ** 3:>5.1f} GB"
+
+
+def render_menu(configs, missing, sizes=None):
+    """`sizes` maps config name to file size in bytes. Sizes are shown because
+    two of these models exceed the card's VRAM, so the number is decision-
+    relevant rather than decoration."""
+    sizes = sizes or {}
     lines = ["Available launch configs:", ""]
     for i, cfg in enumerate(configs, 1):
         mark = "  !missing" if cfg["name"] in missing else ""
         lines.append(f"  {i:>2}  {cfg['name']:<32} "
-                     f"{os.path.basename(cfg['model'])}{mark}")
+                     f"{os.path.basename(cfg['model']):<44} "
+                     f"{_size_label(sizes.get(cfg['name']))}{mark}")
     lines += ["", "  [n] new config from a .gguf   [q] quit"]
     return "\n".join(lines)
 ```
@@ -2286,9 +2380,12 @@ def main():
 
     while True:
         root = data["model_root"]
-        missing = {c["name"] for c in data["configs"]
-                   if not os.path.exists(config.resolve_path(c["model"], root))}
-        print("\n" + board.render_menu(data["configs"], missing))
+        resolved = {c["name"]: config.resolve_path(c["model"], root)
+                    for c in data["configs"]}
+        missing = {n for n, p in resolved.items() if not os.path.exists(p)}
+        sizes = {n: os.path.getsize(p) for n, p in resolved.items()
+                 if n not in missing}
+        print("\n" + board.render_menu(data["configs"], missing, sizes))
         choice = input("> ").strip().lower()
 
         if choice == "q":

@@ -295,7 +295,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   5  toggles      jinja on  no-mmproj on  reasoning auto  metrics off  fa on  kv-unified on
   6  kv cache     K f16 / V f16
   7  batching     -np auto  -b 2048  -ub 512
-* 8  speculative  draft-mtp  (built-in, no draft model)  n-max 3  p-min 0.75
+* 8  speculative  draft-mtp  (built-in, no draft model)  n-max 3  n-min 0  p-min 0.75
   9  template     preserve_thinking=true  enable_thinking=true
  10  extra args   (none)
 
@@ -303,6 +303,10 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
 ```
 
 - `*` marks rows edited but not yet saved.
+- Row 8 shows every shared knob (`n-max`, `n-min`, `p-min`), and additionally `draft ngl`
+  when the spec type takes a separate draft model. An earlier draft of this mockup omitted
+  `n-min`, contradicting §5 which lists it as a real setting: a setting the user can edit
+  must be one the user can see, so the mockup was wrong, not the board.
 - Editing a row walks its settings with `[current]` in brackets; Enter accepts. Choice
   types list allowed values. Invalid input re-prompts and never raises.
 - `[c]` prints the exact equivalent command line, copy-pasteable into a shell.
