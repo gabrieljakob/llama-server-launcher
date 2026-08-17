@@ -188,3 +188,95 @@ def parse_value(setting, text):
         return True, text
 
     return True, text            # str, path
+
+
+def _negate(flag):
+    """--kv-unified -> --no-kv-unified"""
+    return "--no-" + flag.lstrip("-")
+
+
+def emit(setting, value):
+    """Render one setting as argv fragments. Empty list means 'omit entirely'."""
+    if value is None:
+        return []
+    t = setting.type
+
+    if t == "bool":
+        return [setting.flag] if value else []
+
+    if t == "tri":
+        if value == "on":
+            return [setting.flag]
+        if value == "off":
+            return [_negate(setting.flag)]
+        return []
+
+    if t == "json":
+        if not value:
+            return []
+        return [setting.flag, json.dumps(value, separators=(",", ":"))]
+
+    if t == "raw":
+        return shlex.split(value) if value else []
+
+    return [setting.flag, str(value)]
+
+
+def spec_types_of(values):
+    raw = values.get("spec_type") or "none"
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def spec_error(values):
+    """Validate the speculative group before launch. None means OK."""
+    types = spec_types_of(values)
+    if types == ["none"] or not types:
+        return None
+    needs_draft = [t for t in types if t in DRAFT_MODEL_TYPES]
+    has_draft = bool(values.get("draft_model"))
+    if needs_draft and not has_draft:
+        return (f"spec-type {needs_draft[0]!r} needs a draft model "
+                f"- set one on the speculative row")
+    if "draft-mtp" in types and has_draft:
+        return ("spec-type 'draft-mtp' takes no draft model - MTP is built into "
+                "the model's own weights; clear the draft model row")
+    return None
+
+
+def active_keys(values):
+    """Which setting keys emit, given the current values. Encodes the gating."""
+    keys = {s.key for g in GROUPS for s in g.settings}
+    types = spec_types_of(values)
+
+    if types == ["none"] or not types:
+        return keys - {"spec_type", "draft_model", "spec_ngl",
+                       "spec_n_max", "spec_n_min", "spec_p_min"}
+
+    if not any(t in DRAFT_MODEL_TYPES for t in types):
+        # draft-mtp and every ngram-* type run without a separate draft GGUF
+        keys -= {"draft_model", "spec_ngl"}
+    return keys
+
+
+def editable_keys(values):
+    """Which setting keys the board prompts for. Same gating as emission, except
+    spec_type is always editable - otherwise row 8 could never be switched on,
+    since 'none' is the default and 'none' removes itself from active_keys."""
+    return active_keys(values) | {"spec_type"}
+
+
+def build_argv(values, model_path, alias, draft_path=None):
+    """Full argv after the executable. Caller prepends the llama-server path."""
+    argv = ["--model", model_path, "--alias", alias]
+    live = active_keys(values)
+
+    for group in GROUPS:
+        for setting in group.settings:
+            if setting.key not in live:
+                continue
+            if setting.key == "draft_model":
+                if draft_path:
+                    argv += [setting.flag, draft_path]
+                continue
+            argv += emit(setting, values.get(setting.key))
+    return argv
