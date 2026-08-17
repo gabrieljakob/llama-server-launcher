@@ -59,8 +59,26 @@ class TestRenderGroup(unittest.TestCase):
 
     def test_reasoning_row_shows_every_lever_at_its_default(self):
         text = board.render_group(self.group("reasoning"), self.values())
-        for token in ("reasoning auto", "effort default", "preserve -", "budget -"):
+        for token in ("reasoning auto", "effort default", "preserve -", "budget -",
+                      "budget-message -"):
             self.assertIn(token, text)
+
+    def test_free_text_with_spaces_is_quoted_on_the_board(self):
+        """Rows separate their values with two spaces, so an unquoted sentence
+        reads as several settings the board does not have. The quotes say where
+        one value ends - and this is the only row that holds prose."""
+        text = board.render_group(
+            self.group("reasoning"),
+            self.values(reasoning_budget_message="Wrap it up now."))
+        self.assertIn('budget-message "Wrap it up now."', text)
+
+    def test_free_text_without_spaces_is_left_bare(self):
+        """The quotes are there to hold a sentence together, not to decorate.
+        A one-word value cannot be mistaken for two settings."""
+        text = board.render_group(
+            self.group("reasoning"), self.values(reasoning_budget_message="Stop."))
+        self.assertIn("budget-message Stop.", text)
+        self.assertNotIn('"', text)
 
     def test_unrestricted_reasoning_budget_is_not_shown_as_a_sentinel(self):
         """-1 is llama-server's spelling of 'no limit', the same way -1 is its

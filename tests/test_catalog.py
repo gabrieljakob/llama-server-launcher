@@ -18,7 +18,7 @@ class TestCatalogShape(unittest.TestCase):
         by_group = {g.key: [s.key for s in g.settings] for g in catalog.GROUPS}
         self.assertEqual(by_group["reasoning"],
                          ["reasoning", "reasoning_effort", "reasoning_preserve",
-                          "reasoning_budget"])
+                          "reasoning_budget", "reasoning_budget_message"])
         for key in by_group["reasoning"]:
             self.assertNotIn(key, by_group["toggles"])
 
@@ -215,6 +215,14 @@ class TestParseValue(unittest.TestCase):
         self.assertEqual(self.parse("reasoning_budget", "512"), (True, 512))
         self.assertEqual(self.parse("reasoning_budget", "-"), (True, None))
 
+    def test_reasoning_budget_message_takes_free_text(self):
+        """A whole sentence is the ordinary value here - it is injected before
+        the end-of-thinking tag - so nothing about it is validated beyond the
+        dash that clears it."""
+        self.assertEqual(self.parse("reasoning_budget_message", "Wrap it up."),
+                         (True, "Wrap it up."))
+        self.assertEqual(self.parse("reasoning_budget_message", "-"), (True, None))
+
     def test_reasoning_budget_rejects_below_unrestricted(self):
         """-1 is the smallest thing the flag means. Build 10453 takes -2 without
         a word, so nothing downstream would tell the user their budget was
@@ -308,6 +316,12 @@ class TestEmit(unittest.TestCase):
         self.assertEqual(self.emit("reasoning_budget", 0),
                          ["--reasoning-budget", "0"])
 
+    def test_reasoning_budget_message_emits_one_argument(self):
+        """One argv entry, spaces and all. spawn() passes a list, so nothing
+        re-splits it on the way to the process."""
+        self.assertEqual(self.emit("reasoning_budget_message", "Wrap it up."),
+                         ["--reasoning-budget-message", "Wrap it up."])
+
     def test_an_unset_server_default_emits_nothing(self):
         """Settings with None default are not passed; they let llama-server use
         its own defaults."""
@@ -315,6 +329,7 @@ class TestEmit(unittest.TestCase):
         self.assertEqual(self.emit("repeat_penalty", None), [])
         self.assertEqual(self.emit("repeat_last_n", None), [])
         self.assertEqual(self.emit("reasoning_budget", None), [])
+        self.assertEqual(self.emit("reasoning_budget_message", None), [])
 
 
 class TestSpecGating(unittest.TestCase):

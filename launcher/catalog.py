@@ -116,6 +116,14 @@ GROUPS = [
         # message on the row it came from.
         Setting("reasoning_budget", "--reasoning-budget", "budget", "int", None,
                 lo=-1),
+        # Only ever read when a budget runs out, and it travels with the budget
+        # for that reason. Unvalidated free text: it is injected into the model's
+        # own thinking, just before the end-of-thinking tag, so its content is a
+        # prompt-writing decision and not the launcher's business. It emits as
+        # ONE argv entry, spaces and all - spawn() passes a list, and [c] quotes
+        # it for PowerShell.
+        Setting("reasoning_budget_message", "--reasoning-budget-message",
+                "budget-message", "str", None),
     ]),
     Group("toggles", "toggles", [
         Setting("jinja", "--jinja", "jinja", "bool", True),

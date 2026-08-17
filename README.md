@@ -40,7 +40,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL.gguf   |  CUDA0: NVIDIA GeForce RTX 4080 (16375 Mi
   3  host:port    127.0.0.1:8080
   4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
   5  penalties    presence -  frequency -  repeat -  repeat-last-n -
-  6  reasoning    reasoning on  effort xhigh  preserve -  budget -
+  6  reasoning    reasoning on  effort xhigh  preserve -  budget -  budget-message -
   7  toggles      jinja on  no-mmproj on  metrics off  fa on  kv-unified on
   8  kv cache     K f16 / V f16
   9  batching     -np auto  -b 2048  -ub 512
@@ -175,7 +175,7 @@ plus `os.replace` — so an interrupted write cannot leave you with a truncated 
 
 ## Reasoning
 
-Row 6 carries all four `--reasoning*` flags, because they are one concept and the toggles row was
+Row 6 carries every `--reasoning*` flag, because they are one concept and the toggles row was
 already the widest on the board:
 
 | Shown | Flag | Unset means |
@@ -184,6 +184,12 @@ already the widest on the board:
 | `effort <level>` | `--reasoning-effort` | — (`default` keeps the template's own) |
 | `preserve on \| off \| -` | `--reasoning-preserve` / `--no-reasoning-preserve` | the template decides |
 | `budget <n> \| -` | `--reasoning-budget` | unrestricted (`-1`); `0` ends thinking immediately |
+| `budget-message "<text>"` | `--reasoning-budget-message` | nothing is injected |
+
+`budget-message` is free text, injected just before the end-of-thinking tag when the budget runs
+out — so it only ever does anything alongside a `budget`. It is one argument however many spaces it
+contains, on the board (where it is quoted, since rows separate values with two spaces), in the
+`[c]` command line, and on the way to the process.
 
 `preserve` is the one to reach for when llama-server announces at startup that the model's template
 advertises the `supports_preserve_reasoning` capability — it keeps the reasoning trace for the whole

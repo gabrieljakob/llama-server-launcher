@@ -129,7 +129,7 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
 | 4 sampling | `temp`, `top_k`, `top_p`, `min_p` | `--temp`, `--top-k`, `--top-p`, `--min-p` | float ≥ 0, int ≥ 0, float 0–1, float 0–1 | 0.6, 20, 0.95, 0.0 |
 | 5 penalties | `presence_penalty`, `frequency_penalty`, `repeat_penalty`, `repeat_last_n` | `--presence-penalty`, `--frequency-penalty`, `--repeat-penalty`, `--repeat-last-n` | float, float, float ≥ 0, int ≥ 0 | **all unset** |
-| 6 reasoning | `reasoning`, `reasoning_effort`, `reasoning_preserve`, `reasoning_budget` | `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--reasoning-budget` | choice, choice, tri, int ≥ -1 | `auto`, `default`, unset, unset |
+| 6 reasoning | `reasoning`, `reasoning_effort`, `reasoning_preserve`, `reasoning_budget`, `reasoning_budget_message` | `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--reasoning-budget`, `--reasoning-budget-message` | choice, choice, tri, int ≥ -1, str | `auto`, `default`, unset, unset, unset |
 | 7 toggles | `jinja`, `no_mmproj`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `--metrics`, `-fa`, `-kvu` | bool, bool, bool, choice, tri | true, true, false, `on`, unset |
 | 8 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
 | 9 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
@@ -138,8 +138,10 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 12 extra args | `extra` | *(verbatim)* | str | `""` |
 
 **The reasoning settings are their own row**, split out of toggles on 2026-08-17 when
-`reasoning_budget` was added. Same argument as the penalties row: eight values on one line
-stops being readable, and these four are one concept. Discoverability was the trigger —
+`reasoning_budget` and `reasoning_budget_message` were added. Same argument as the
+penalties row: eight values on one line stops being readable, and these five are one
+concept — `reasoning_budget_message` in particular is only ever read when a budget runs
+out, so it belongs beside the budget rather than anywhere else. Discoverability was the trigger —
 build 10453 announces at startup that a model's template advertises
 `supports_preserve_reasoning`, and the flag it is pointing at was in the catalog and
 editable but invisible on the board (see the tri-state rendering note below), so the
@@ -176,6 +178,14 @@ that flag. `draft_model` is the other one.
   discovered as strange model behaviour instead of as a message on the row it came from.
   The board renders `-1` as `budget unrestricted`, the same courtesy `-np -1` gets as
   `auto` — display only, emission still sends the number.
+- `reasoning_budget_message` is unvalidated free text: it is injected into the model's own
+  thinking, just before the end-of-thinking tag, so its content is a prompt-writing
+  decision rather than the launcher's business. It emits as one argv entry however many
+  spaces it holds — `spawn()` passes a list, and `[c]` quotes it for PowerShell. On the
+  board a value containing whitespace is shown in quotes, because rows separate their
+  values with two spaces and an unquoted sentence reads as several settings that do not
+  exist. A value without whitespace stays bare rather than putting quotes on every host
+  and path.
 - **An unset setting renders as `label -`, for every type including tri.** Tri-states used
   to render as nothing at all, reasoned as "`off` would claim we pass `--no-flag` when we
   pass nothing". True of `off` and not of `-`, and the cost was the whole setting:
@@ -335,7 +345,7 @@ Model: Qwen3.8-27B-UD-Q3_K_XL    12.5 GB   |  CUDA0: 15.0 GB free
   3  host:port    127.0.0.1:8080
   4  sampling     temp 0.6  top-k 20  top-p 0.95  min-p 0.0
   5  penalties    presence 0.0  frequency -  repeat -  repeat-last-n -
-  6  reasoning    reasoning auto  effort xhigh  preserve -  budget -
+  6  reasoning    reasoning auto  effort xhigh  preserve -  budget -  budget-message -
   7  toggles      jinja on  no-mmproj on  metrics off  fa on  kv-unified on
   8  kv cache     K f16 / V f16
   9  batching     -np auto  -b 2048  -ub 512

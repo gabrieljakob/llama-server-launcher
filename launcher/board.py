@@ -69,6 +69,13 @@ def _fmt(setting, value):
         # board shows arguments the launch is not actually passing.
         ok, _ = catalog.split_extra(value)
         return value if ok else _bad(setting.label, value)
+    if isinstance(value, str) and any(c.isspace() for c in value):
+        # Quoted, because a row separates its values with two spaces and an
+        # unquoted sentence reads as several settings the board does not have.
+        # reasoning_budget_message is the one row that holds prose; a value
+        # without whitespace cannot be misread, so it stays bare rather than
+        # putting quotes around every host and path on the board.
+        return f'{setting.label} "{value}"'
     return f"{setting.label} {value}"
 
 
