@@ -72,8 +72,10 @@ def render_board(values, dirty, header):
     for i, group in enumerate(catalog.GROUPS, 1):
         mark = "*" if group.key in dirty else " "
         lines.append(f"{mark}{i:>2}  {group.label:<12} {render_group(group, values)}")
-    lines += ["", "  [1-10] edit   [s] save   [c] show command   "
-                  "[Enter] launch   [q] back"]
+    # Derived, not hardcoded: a hardcoded "[1-10]" silently lies the moment a
+    # row is added, and the whole point of the catalog is that rows can be added.
+    lines += ["", f"  [1-{len(catalog.GROUPS)}] edit   [s] save   [c] show command   "
+                  f"[Enter] launch   [q] back"]
     return "\n".join(lines)
 
 

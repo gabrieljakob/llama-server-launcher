@@ -3,11 +3,12 @@ from launcher import catalog
 
 
 class TestCatalogShape(unittest.TestCase):
-    def test_ten_groups_in_board_order(self):
+    def test_groups_are_in_board_order(self):
         labels = [g.label for g in catalog.GROUPS]
         self.assertEqual(labels, [
-            "context", "gpu layers", "host:port", "sampling", "toggles",
-            "kv cache", "batching", "speculative", "template", "extra args",
+            "context", "gpu layers", "host:port", "sampling", "penalties",
+            "toggles", "kv cache", "batching", "speculative", "template",
+            "extra args",
         ])
 
     def test_every_setting_key_is_unique(self):

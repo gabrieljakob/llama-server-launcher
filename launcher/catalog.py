@@ -59,7 +59,17 @@ GROUPS = [
         Setting("top_k", "--top-k", "top-k", "int", 20, lo=0),
         Setting("top_p", "--top-p", "top-p", "float", 0.95, lo=0, hi=1),
         Setting("min_p", "--min-p", "min-p", "float", 0.0, lo=0, hi=1),
+    ]),
+    # Their own row rather than four more fields on sampling: eight values on one
+    # line stops being readable, and these four are one concept.
+    Group("penalties", "penalties", [
         Setting("presence_penalty", "--presence-penalty", "presence", "float", 0.0),
+        Setting("frequency_penalty", "--frequency-penalty", "frequency", "float", 0.0),
+        # 1.0 disables. Not 0.0 - this one is a multiplier, unlike its neighbours.
+        Setting("repeat_penalty", "--repeat-penalty", "repeat", "float", 1.0, lo=0),
+        # lo=0 because 0 disables and the binary REJECTS -1, unlike some older
+        # llama.cpp builds where -1 meant "the whole context".
+        Setting("repeat_last_n", "--repeat-last-n", "repeat-last-n", "int", 64, lo=0),
     ]),
     Group("toggles", "toggles", [
         Setting("jinja", "--jinja", "jinja", "bool", True),

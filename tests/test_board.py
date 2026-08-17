@@ -21,6 +21,14 @@ class TestRenderGroup(unittest.TestCase):
         for token in ("temp 0.6", "top-k 20", "top-p 0.95"):
             self.assertIn(token, text)
 
+    def test_penalties_row_shows_all_four(self):
+        """repeat defaults to 1.0, not 0.0 - it is a multiplier where 1.0 is the
+        no-op, unlike presence and frequency where 0.0 is."""
+        text = board.render_group(self.group("penalties"), self.values())
+        for token in ("presence 0.0", "frequency 0.0",
+                      "repeat 1.0", "repeat-last-n 64"):
+            self.assertIn(token, text)
+
     def test_toggles_render_on_and_off(self):
         text = board.render_group(self.group("toggles"),
                                   self.values(jinja=True, metrics=False))
@@ -92,15 +100,21 @@ class TestRenderBoard(unittest.TestCase):
         """The numbered rows, in order, without the header or footer."""
         return [l for l in text.splitlines() if l[1:3].strip().isdigit()]
 
-    def test_rows_are_numbered_one_to_ten_in_catalog_order(self):
+    def test_rows_are_numbered_in_catalog_order(self):
         """Ordering matters: the number the user types is an index into GROUPS,
-        so a reordered board would edit the wrong row."""
+        so a reordered board would edit the wrong row. Counted against GROUPS
+        rather than a literal, so adding a row does not falsify this test."""
         text = board.render_board(catalog.catalog_defaults(), set(), "hdr")
         rows = self.rows(text)
-        self.assertEqual(len(rows), 10)
+        self.assertEqual(len(rows), len(catalog.GROUPS))
         for i, (row, group) in enumerate(zip(rows, catalog.GROUPS), 1):
             self.assertIn(f"{i:>2}  ", row)
             self.assertIn(group.label, row)
+
+    def test_the_footer_names_the_real_row_range(self):
+        """A hardcoded [1-10] would silently lie once a row is added."""
+        text = board.render_board(catalog.catalog_defaults(), set(), "hdr")
+        self.assertIn(f"[1-{len(catalog.GROUPS)}] edit", text)
 
     def test_dirty_rows_are_starred(self):
         text = board.render_board(catalog.catalog_defaults(), {"batching"}, "hdr")
@@ -152,7 +166,7 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(board.dispatch("10"), "edit:10")
 
     def test_out_of_range_digits_are_unknown(self):
-        self.assertEqual(board.dispatch("11"), "unknown")
+        self.assertEqual(board.dispatch(str(len(catalog.GROUPS) + 1)), "unknown")
         self.assertEqual(board.dispatch("0"), "unknown")
 
     def test_letters_map_to_actions(self):
