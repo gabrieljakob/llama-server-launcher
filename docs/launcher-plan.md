@@ -2288,29 +2288,50 @@ DEFAULT_ROOT = r"D:\LLM Models"
 DEFAULT_EXE = r"D:\llama.cpp\llama-server.exe"
 
 
+class Abort(Exception):
+    """Raised by ask() when stdin ends or the user interrupts."""
+
+
 def ask(prompt=""):
-    """input() that treats EOF and Ctrl-C as "quit" instead of a traceback.
+    """input() that turns EOF and Ctrl-C into an Abort instead of a traceback.
 
     A piped, redirected or closed stdin makes input() raise EOFError, and Ctrl-C
-    raises KeyboardInterrupt. Either would end the session with a stack trace
-    across the user's console. Every prompt in this module goes through here."""
+    raises KeyboardInterrupt. Either would end the session with a stack trace.
+
+    This raises rather than returning a sentinel STRING, and that matters. A
+    sentinel like "q" cannot be told apart from the user typing "q", which broke
+    two ways: at the new-config name prompt an interrupt would silently create a
+    config literally named "q", which any later save would persist; and in any
+    row editor that re-prompts on invalid input, the sentinel fails validation,
+    the loop asks again, and a closed stdin yields the sentinel forever - an
+    infinite loop instead of the clean exit this function exists to provide.
+    An exception cannot be mistaken for input, and cannot be re-prompted past."""
     try:
         return input(prompt)
     except (EOFError, KeyboardInterrupt):
         print()
-        return "q"
+        raise Abort from None
 
 
 def first_run_migration():
+    """Returns False if migration was needed but could not be done."""
     if os.path.exists(CONFIG_PATH) or not os.path.exists(LEGACY_PATH):
-        return
+        return True
     print("No launcher_configs.json found. Migrating from model_profiles.json:")
-    legacy = config.load(LEGACY_PATH)
+    try:
+        legacy = config.load(LEGACY_PATH)
+    except config.ConfigError as exc:
+        # A corrupt legacy file must report itself, not traceback. This is the
+        # one load main() does not already guard.
+        print(f"  cannot migrate: {exc}")
+        print(f"  Fix {LEGACY_PATH}, or move it aside to start from scratch.")
+        return False
     doc, report = config.migrate(legacy, DEFAULT_ROOT, DEFAULT_EXE)
     config.save(CONFIG_PATH, doc)
     for line in report:
         print(line)
     print()
+    return True
 
 
 def scan_models(model_root):
@@ -2336,8 +2357,17 @@ def launch(data, cfg, values):
 
     root = data["model_root"]
     model_path = config.resolve_path(cfg["model"], root)
+    # Re-checked here, not only at the menu: the file may have moved between
+    # rendering that list and pressing Enter. Failing here says why; failing
+    # inside spawn does not.
+    if not os.path.exists(model_path):
+        print(f"\n  cannot launch: model file is gone - {model_path}\n")
+        return
     draft_path = (config.resolve_path(values["draft_model"], root)
                   if values.get("draft_model") else None)
+    if draft_path and not os.path.exists(draft_path):
+        print(f"\n  cannot launch: draft model is gone - {draft_path}\n")
+        return
     argv = [data["llama_server"]] + catalog.build_argv(
         values, model_path, cfg.get("alias") or cfg["name"], draft_path)
 
@@ -2436,7 +2466,19 @@ def new_config(data):
 
 
 def main():
-    first_run_migration()
+    try:
+        return _main()
+    except Abort:
+        # Ctrl-C or a closed stdin, from any depth. Quitting is the honest
+        # response: nothing unsaved is written, and the alternative is guessing
+        # which prompt the user meant to escape.
+        print("  quit")
+        return 0
+
+
+def _main():
+    if not first_run_migration():
+        return 1
     try:
         data = config.load(CONFIG_PATH)
     except config.ConfigError as exc:
