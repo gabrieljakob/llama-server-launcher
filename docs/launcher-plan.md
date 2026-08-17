@@ -153,6 +153,19 @@ class TestParseValue(unittest.TestCase):
     def test_choice_accepts_allowed(self):
         self.assertEqual(self.parse("cache_type_k", "q8_0"), (True, "q8_0"))
 
+    def test_reasoning_effort_accepts_the_documented_levels(self):
+        """Verified against build 10453: default/minimal/low/medium/high/xhigh/max
+        all parse at the command line. The value is handed to the chat template,
+        which is what actually decides whether a level does anything."""
+        for level in catalog.REASONING_EFFORTS:
+            with self.subTest(level=level):
+                self.assertEqual(self.parse("reasoning_effort", level), (True, level))
+
+    def test_reasoning_effort_rejects_an_unknown_level(self):
+        ok, err = self.parse("reasoning_effort", "extreme")
+        self.assertFalse(ok)
+        self.assertIn("xhigh", err)
+
     def test_choice_rejects_unknown_and_lists_options(self):
         ok, err = self.parse("cache_type_k", "q3_0")
         self.assertFalse(ok)
@@ -227,6 +240,10 @@ SPEC_TYPES = ["none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash
               "ngram-mod", "ngram-cache"]
 ONOFFAUTO = ["on", "off", "auto"]
 
+# Passed through to the chat template, which decides what it honours - llama-server
+# itself accepts any string here. These are the levels build 10453 documents.
+REASONING_EFFORTS = ["default", "minimal", "low", "medium", "high", "xhigh", "max"]
+
 # Spec types needing a separate draft-model GGUF. draft-mtp is deliberately absent:
 # the multi-token-prediction head is built into the model's own weights.
 DRAFT_MODEL_TYPES = {"draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark"}
@@ -273,6 +290,8 @@ GROUPS = [
         Setting("jinja", "--jinja", "jinja", "bool", True),
         Setting("no_mmproj", "--no-mmproj", "no-mmproj", "bool", True),
         Setting("reasoning", "--reasoning", "reasoning", "choice", "auto", ONOFFAUTO),
+        Setting("reasoning_effort", "--reasoning-effort", "effort", "choice",
+                "default", REASONING_EFFORTS),
         Setting("reasoning_preserve", "--reasoning-preserve", "reason-preserve", "tri", None),
         Setting("metrics", "--metrics", "metrics", "bool", False),
         Setting("flash_attn", "--flash-attn", "fa", "choice", "on", ONOFFAUTO),
@@ -569,6 +588,7 @@ class TestAnchorCommands(unittest.TestCase):
     def test_qwen38_preserve_thinking_coding(self):
         v = catalog.catalog_defaults()
         v.update({"temp": 0.6, "presence_penalty": 0.0, "kv_unified": "on",
+                  "reasoning_effort": "xhigh",
                   "spec_type": "draft-mtp", "spec_n_max": 3, "spec_p_min": 0.75,
                   "chat_template_kwargs": {"preserve_thinking": True,
                                            "enable_thinking": True}})
@@ -577,6 +597,7 @@ class TestAnchorCommands(unittest.TestCase):
             ("--spec-type", "draft-mtp"), ("--spec-draft-n-max", "3"),
             ("--spec-draft-p-min", "0.75"), ("--temp", "0.6"),
             ("--presence-penalty", "0.0"),
+            ("--reasoning-effort", "xhigh"),
             ("--chat-template-kwargs",
              '{"preserve_thinking":true,"enable_thinking":true}'),
         ])

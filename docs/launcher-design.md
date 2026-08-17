@@ -62,8 +62,15 @@ N and defaults to `auto`; the existing profiles' hardcoded `99` is the older idi
   extra-args row.
 - Device/multi-GPU flags (`--device`, `--tensor-split`, `--main-gpu`, `--split-mode`).
   One device exists. Extra-args covers exotic cases.
-- Draft KV cache types (`-ctkd`, `-ctvd`), `--reasoning-format`, `--reasoning-budget`,
-  `--reasoning-effort`. Extra-args covers these.
+- Draft KV cache types (`-ctkd`, `-ctvd`), `--reasoning-format`, `--reasoning-budget`.
+  Extra-args covers these.
+
+  **`--reasoning-effort` was promoted out of this list on 2026-08-17.** It was originally
+  cut alongside the other reasoning flags. The user runs Qwen3.8-27B with reasoning effort
+  enabled and wants `xhigh`, so it becomes a catalog row instead. Verified against build
+  10453: the documented levels are `default, minimal, low, medium, high, xhigh, max`, and
+  all parse. The value is passed through to the chat template, so whether a level is
+  honoured depends on the model's template rather than on llama-server.
 - Managing, downloading or converting model files.
 
 ---
@@ -121,7 +128,7 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
 | 2 gpu layers | `gpu_layers` | `-ngl` | `auto` \| `all` \| int ≥ 0 | `auto` |
 | 3 host:port | `host`, `port` | `--host`, `--port` | str, int 1–65535 | `127.0.0.1`, 8080 |
 | 4 sampling | `temp`, `top_k`, `top_p`, `min_p`, `presence_penalty` | `--temp`, `--top-k`, `--top-p`, `--min-p`, `--presence-penalty` | float ≥ 0, int ≥ 0, float 0–1, float 0–1, float | 0.6, 20, 0.95, 0.0, 0.0 |
-| 5 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, tri, bool, choice, tri | true, true, `auto`, unset, false, `on`, unset |
+| 5 toggles | `jinja`, `no_mmproj`, `reasoning`, `reasoning_effort`, `reasoning_preserve`, `metrics`, `flash_attn`, `kv_unified` | `--jinja`, `--no-mmproj`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`, `--metrics`, `-fa`, `-kvu` | bool, bool, choice, choice, tri, bool, choice, tri | true, true, `auto`, `default`, unset, false, `on`, unset |
 | 6 kv cache | `cache_type_k`, `cache_type_v` | `-ctk`, `-ctv` | choice | `f16`, `f16` |
 | 7 batching | `parallel`, `batch`, `ubatch` | `-np`, `-b`, `-ub` | int | -1 (auto), 2048, 512 |
 | 8 speculative | `spec_type`, `draft_model`, `spec_ngl`, `spec_n_max`, `spec_n_min`, `spec_p_min` | `--spec-type`, `--spec-draft-model`, `--spec-draft-ngl`, `--spec-draft-n-max`, `--spec-draft-n-min`, `--spec-draft-p-min` | choice-list, path, str, int, int, float | `none`, none, `auto`, 3, 0, 0.0 |
@@ -135,6 +142,9 @@ Each setting declares: `key` (identity in JSON), `flag`, `label`, `type`, `defau
   draft-dflash, draft-dspark, ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod,
   ngram-cache`
 - `reasoning`, `flash_attn`: `on, off, auto`
+- `reasoning_effort`: `default, minimal, low, medium, high, xhigh, max`. Passed through to
+  the chat template; llama-server does not validate it, so an unlisted value is accepted at
+  the command line and simply ignored by a template that does not understand it.
 - **tri** types are unset / on / off, emitting nothing / `--flag` / `--no-flag`
   respectively. `--kv-unified` and `--reasoning-preserve` both default to a value the
   binary decides (slot count and chat template respectively), so "unset" must stay
@@ -216,7 +226,7 @@ move out of Python and into this file — relocating a drive no longer means edi
       "alias": "qwen3.8",
       "settings": {
         "temp": 0.6, "presence_penalty": 0.0,
-        "kv_unified": "on",
+        "kv_unified": "on", "reasoning_effort": "xhigh",
         "spec_type": "draft-mtp", "spec_n_max": 3, "spec_p_min": 0.75,
         "chat_template_kwargs": { "preserve_thinking": true, "enable_thinking": true }
       } }
