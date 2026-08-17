@@ -281,4 +281,4 @@ platform, and device detection asks the binary.
 
 ## Licence
 
-MIT.
+[MIT](LICENSE) — do what you like, keep the notice.
