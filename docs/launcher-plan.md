@@ -1377,23 +1377,53 @@ class TestParseTasklist(unittest.TestCase):
 class TestKillGuard(unittest.TestCase):
     """kill() force-terminates a real process. port_owner's snapshot can be
     minutes old by the time a user answers a prompt, and Windows recycles PIDs -
-    so identity is re-checked immediately before the kill."""
+    so identity is re-checked immediately before the kill.
+
+    Every test here injects both `name_of` and `force`, so nothing real dies."""
+
+    def kill(self, reported, expect="llama-server.exe"):
+        """Returns (result, pids actually passed to the killer)."""
+        killed = []
+        result = server.kill(4321, expect_name=expect,
+                             name_of=lambda pid: reported,
+                             force=lambda pid: killed.append(pid) or True)
+        return result, killed
+
+    def test_proceeds_when_the_name_matches(self):
+        """The positive path. Without this, a regression to 'always refuse'
+        would pass every other test in this class while making the launcher
+        permanently unable to take a busy port."""
+        result, killed = self.kill("llama-server.exe")
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
+
+    def test_match_is_case_insensitive(self):
+        result, killed = self.kill("LLAMA-SERVER.EXE")
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
 
     def test_refuses_when_the_name_no_longer_matches(self):
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "notepad.exe")
-        self.assertFalse(killed)
+        result, killed = self.kill("notepad.exe")
+        self.assertFalse(result)
+        self.assertEqual(killed, [], "must not have called the killer at all")
 
     def test_refuses_when_the_process_has_vanished(self):
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "")
-        self.assertFalse(killed)
+        result, killed = self.kill("")
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
 
     def test_refuses_when_the_name_is_unknown(self):
         """'unknown' means tasklist itself failed. Not knowing is not permission."""
-        killed = server.kill(4321, expect_name="llama-server.exe",
-                             name_of=lambda pid: "unknown")
-        self.assertFalse(killed)
+        result, killed = self.kill("unknown")
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_expect_name_is_required_and_keyword_only(self):
+        """A default would let a caller silently fall back to unguarded killing."""
+        with self.assertRaises(TypeError):
+            server.kill(4321)
+        with self.assertRaises(TypeError):
+            server.kill(4321, "llama-server.exe")     # positional not allowed
 
 
 if __name__ == "__main__":
@@ -1473,27 +1503,37 @@ def port_owner(port):
     return pid, name
 
 
-def kill(pid, expect_name=None, name_of=process_name):
-    """Force-stop `pid`. Returns True only if it was actually killed.
-
-    `expect_name` re-verifies identity immediately before killing, and callers
-    that got their pid from port_owner should always pass it. That snapshot can
-    be minutes old by the time a user answers a confirmation prompt; if the
-    server exited in the meantime and Windows recycled its pid, killing blind
-    would terminate an unrelated process. Refuses on a mismatch, on "" (already
-    gone) and on "unknown" (tasklist failed) - not knowing is not permission.
-
-    `name_of` is injectable so the guard is testable without spawning anything."""
-    if expect_name is not None:
-        current = name_of(pid)
-        if not current or current.lower() != expect_name.lower():
-            return False
+def _force_kill(pid):
+    """The actual taskkill. Separated so kill()'s guard can be tested without
+    terminating anything real."""
     try:
         r = subprocess.run(["taskkill", "/PID", str(pid), "/F"],
                            capture_output=True, text=True, timeout=20)
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def kill(pid, *, expect_name, name_of=process_name, force=_force_kill):
+    """Force-stop `pid`, but only if it is still `expect_name`. Returns True
+    only if it was actually killed.
+
+    `expect_name` is REQUIRED and keyword-only, deliberately. A default of None
+    would mean a caller who forgets it silently gets unguarded killing, and the
+    whole point of this function is that killing blind is unsafe: port_owner's
+    snapshot can be minutes old by the time a user answers a confirmation
+    prompt, and Windows recycles pids. Every call site must state what it
+    believes it is killing.
+
+    Refuses on a name mismatch, on "" (already gone) and on "unknown" (tasklist
+    failed) - not knowing is not permission.
+
+    `name_of` and `force` are injectable so both the refuse path AND the
+    proceed path are testable without terminating a real process."""
+    current = name_of(pid)
+    if not current or current.lower() != expect_name.lower():
+        return False
+    return force(pid)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
