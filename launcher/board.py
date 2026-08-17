@@ -8,6 +8,13 @@ from . import catalog
 def _fmt(setting, value):
     if value is None:
         return None
+    if setting.key == "parallel" and value == -1:
+        # -1 is llama-server's sentinel for "choose a slot count for me". Show
+        # what it means, not the sentinel: gpu_layers already displays "auto"
+        # because its default IS the string "auto", and a board that prints
+        # "auto" on one row and "-1" on another for the same concept is just
+        # leaking an implementation detail. Display only - emit() still sends -1.
+        return f"{setting.label} auto"
     if setting.type == "bool":
         return f"{setting.label} {'on' if value else 'off'}"
     if setting.type == "tri":
@@ -39,9 +46,17 @@ def render_group(group, values):
         live = catalog.active_keys(values)
         parts = [types]
         if "draft_model" not in live:
+            # draft-mtp and every ngram-* type: the model carries its own
+            # prediction head. Asking active_keys rather than listing the type
+            # names keeps this from drifting when the catalog gains a type.
             parts.append("(built-in, no draft model)")
-        elif values.get("draft_model"):
-            parts.append(os.path.basename(str(values["draft_model"])))
+        else:
+            if values.get("draft_model"):
+                parts.append(os.path.basename(str(values["draft_model"])))
+            # spec_ngl is only meaningful with a separate draft model, but it IS
+            # editable, and a setting the user can change must be visible.
+            ngl = catalog.settings_by_key()["spec_ngl"]
+            parts.append(f"{ngl.label} {values.get('spec_ngl')}")
         for key in ("spec_n_max", "spec_n_min", "spec_p_min"):
             setting = catalog.settings_by_key()[key]
             parts.append(f"{setting.label} {values.get(key)}")
@@ -56,17 +71,29 @@ def render_board(values, dirty, header):
     lines = [header, ""]
     for i, group in enumerate(catalog.GROUPS, 1):
         mark = "*" if group.key in dirty else " "
-        lines.append(f"{mark}{i:>3}  {group.label:<12} {render_group(group, values)}")
+        lines.append(f"{mark}{i:>2}  {group.label:<12} {render_group(group, values)}")
     lines += ["", "  [1-10] edit   [s] save   [c] show command   "
                   "[Enter] launch   [q] back"]
     return "\n".join(lines)
 
 
-def render_menu(configs, missing):
+def _size_label(size):
+    """Human file size, or blank padding when the size is unknown."""
+    if not size:
+        return " " * 8
+    return f"{size / 1024 ** 3:>5.1f} GB"
+
+
+def render_menu(configs, missing, sizes=None):
+    """`sizes` maps config name to file size in bytes. Sizes are shown because
+    two of these models exceed the card's VRAM, so the number is decision-
+    relevant rather than decoration."""
+    sizes = sizes or {}
     lines = ["Available launch configs:", ""]
     for i, cfg in enumerate(configs, 1):
         mark = "  !missing" if cfg["name"] in missing else ""
         lines.append(f"  {i:>2}  {cfg['name']:<32} "
-                     f"{os.path.basename(cfg['model'])}{mark}")
+                     f"{os.path.basename(cfg['model']):<44} "
+                     f"{_size_label(sizes.get(cfg['name']))}{mark}")
     lines += ["", "  [n] new config from a .gguf   [q] quit"]
     return "\n".join(lines)
