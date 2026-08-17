@@ -113,7 +113,7 @@ class TestBoardKeepsRunningWhenSaveFails(unittest.TestCase):
     def board(self, data, cfg, answers):
         out = io.StringIO()
         answers = iter(answers)
-        with mock.patch.object(main, "vram_line", lambda: ""), \
+        with mock.patch.object(main, "device_line", lambda exe: ""), \
              mock.patch.object(main, "ask", lambda prompt="": next(answers)), \
              contextlib.redirect_stdout(out):
             main.run_board(data, cfg)
@@ -179,7 +179,7 @@ class TestAFailedSaveLeavesTheDocumentUntouched(unittest.TestCase):
     def board(self, data, cfg, answers):
         out = io.StringIO()
         answers = iter(answers)
-        with mock.patch.object(main, "vram_line", lambda: ""), \
+        with mock.patch.object(main, "device_line", lambda exe: ""), \
              mock.patch.object(main, "ask", lambda prompt="": next(answers)), \
              contextlib.redirect_stdout(out):
             main.run_board(data, cfg)
@@ -251,7 +251,7 @@ class TestSaveKeepsSettingsThisLauncherDoesNotKnow(unittest.TestCase):
         out = io.StringIO()
         answers = iter(answers)
         with mock.patch.object(main, "CONFIG_PATH", path), \
-             mock.patch.object(main, "vram_line", lambda: ""), \
+             mock.patch.object(main, "device_line", lambda exe: ""), \
              mock.patch.object(main, "ask", lambda prompt="": next(answers)), \
              contextlib.redirect_stdout(out):
             main.run_board(data, cfg)
@@ -307,7 +307,7 @@ class TestFirstRunMigration(unittest.TestCase):
         with mock.patch.object(main, "CONFIG_PATH", config_path), \
              mock.patch.object(main, "LEGACY_PATH", legacy), \
              contextlib.redirect_stdout(out):
-            ok = main.first_run_migration()
+            ok = main.first_run_migration("D:/M", "D:/s.exe")
         return ok, out.getvalue(), legacy
 
     def test_a_failing_migration_save_is_reported_not_raised(self):
@@ -347,7 +347,7 @@ class TestShowCommandIsValidated(unittest.TestCase):
                 "defaults": {}, "configs": []}
         out = io.StringIO()
         answers = iter(answers)
-        with mock.patch.object(main, "vram_line", lambda: ""), \
+        with mock.patch.object(main, "device_line", lambda exe: ""), \
              mock.patch.object(main, "ask", lambda prompt="": next(answers)), \
              contextlib.redirect_stdout(out):
             main.run_board(data, cfg)
@@ -627,7 +627,7 @@ class TestStartupSurvivesAConfigItCannotRead(unittest.TestCase):
                                os.path.join(folder, "launcher_configs.json")), \
              mock.patch.object(main, "LEGACY_PATH", legacy), \
              contextlib.redirect_stdout(out):
-            ok = main.first_run_migration()
+            ok = main.first_run_migration("D:/M", "D:/s.exe")
         self.assertIs(ok, False)
         self.assertIn("cannot migrate", out.getvalue())
         self.assertTrue(os.path.exists(legacy),

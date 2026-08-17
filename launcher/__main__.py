@@ -2,6 +2,7 @@
 import glob
 import os
 import socket
+import shutil
 import subprocess
 import sys
 
@@ -22,8 +23,22 @@ SCRIPTS = os.path.dirname(HERE)
 CONFIG_PATH = os.path.join(SCRIPTS, "launcher_configs.json")
 LEGACY_PATH = os.path.join(SCRIPTS, "model_profiles.json")
 
-DEFAULT_ROOT = r"D:\LLM Models"
-DEFAULT_EXE = r"D:\llama.cpp\llama-server.exe"
+SERVER_EXE = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+
+# Places a llama.cpp build commonly ends up, checked only if it is not on PATH.
+# Deliberately not a hardcoded single path: this launcher should work on someone
+# else's machine without editing Python.
+def _candidate_server_paths():
+    if sys.platform == "win32":
+        for drive in "CDEFGHI":
+            root = f"{drive}:\\llama.cpp"
+            yield os.path.join(root, SERVER_EXE)
+            yield os.path.join(root, "build", "bin", SERVER_EXE)
+    else:
+        home = os.path.expanduser("~")
+        yield os.path.join("/usr/local/bin", SERVER_EXE)
+        yield os.path.join(home, "llama.cpp", SERVER_EXE)
+        yield os.path.join(home, "llama.cpp", "build", "bin", SERVER_EXE)
 
 
 class Abort(Exception):
@@ -85,8 +100,69 @@ def save_config(path, data):
         raise config.ConfigError(f"could not write {path}: {exc}") from None
 
 
-def first_run_migration():
-    """Returns False if migration was needed but could not be done."""
+def find_llama_server():
+    """A llama-server on PATH, or in a common build location. None if not found."""
+    found = shutil.which(SERVER_EXE)
+    if found:
+        return found
+    return next((p for p in _candidate_server_paths() if os.path.isfile(p)), None)
+
+
+def guess_model_root(profiles):
+    """Deepest folder containing every model in a legacy profiles file."""
+    paths = [m.get("path") for m in profiles.get("models", [])
+             if isinstance(m, dict) and isinstance(m.get("path"), str)]
+    paths = [os.path.normpath(p) for p in paths if p.strip()]
+    if not paths:
+        return None
+    try:
+        # commonpath raises on mixed drives, which is a legitimate answer of
+        # "there is no common root" rather than an error worth propagating.
+        return os.path.commonpath(paths) if len(paths) > 1 else os.path.dirname(paths[0])
+    except ValueError:
+        return None
+
+
+def ask_path(label, guess, must_be_dir, ask=ask):
+    """Prompt until the user gives a path that exists. Blank accepts the guess.
+
+    `ask` is injected so the prompt loop is testable without a terminal."""
+    check = os.path.isdir if must_be_dir else os.path.isfile
+    while True:
+        shown = f" [{guess}]" if guess else ""
+        answer = ask(f"  {label}{shown}: ").strip().strip('"').strip("'")
+        if not answer:
+            answer = guess or ""
+        if not answer:
+            print("    a path is required")
+            continue
+        answer = os.path.expanduser(answer)
+        if check(answer):
+            return answer
+        print(f"    {'not a folder' if must_be_dir else 'not found'}: {answer}")
+
+
+def first_run_setup(legacy=None):
+    """Ask for the two paths the launcher needs. Returns (model_root, exe) or None.
+
+    Asked once, then stored in launcher_configs.json and editable there. The
+    alternative - constants in the source - is what made this launcher only work
+    on the machine it was written on."""
+    print("Setting up. Two paths are needed; both are stored in")
+    print(f"{os.path.basename(CONFIG_PATH)} and can be edited there later.\n")
+    exe = ask_path("llama-server executable", find_llama_server(), must_be_dir=False)
+    root = ask_path("folder containing your .gguf models",
+                    guess_model_root(legacy) if legacy else None, must_be_dir=True)
+    print()
+    return root, exe
+
+
+def first_run_migration(model_root, llama_server):
+    """Returns False if migration was needed but could not be done.
+
+    Takes the two paths rather than asking for them. Prompting in here made
+    migration impossible to run unattended - and made its own tests hang on
+    input() forever. Path resolution belongs to the caller, once."""
     if os.path.exists(CONFIG_PATH) or not os.path.exists(LEGACY_PATH):
         return True
     print("No launcher_configs.json found. Migrating from model_profiles.json:")
@@ -98,7 +174,7 @@ def first_run_migration():
         print(f"  cannot migrate: {exc}")
         print(f"  Fix {LEGACY_PATH}, or move it aside to start from scratch.")
         return False
-    doc, report = config.migrate(legacy, DEFAULT_ROOT, DEFAULT_EXE)
+    doc, report = config.migrate(legacy, model_root, llama_server)
     try:
         save_config(CONFIG_PATH, doc)
     except config.ConfigError as exc:
@@ -116,14 +192,39 @@ def scan_models(model_root):
     return sorted(f for f in found if "mmproj" not in os.path.basename(f).lower())
 
 
-def vram_line():
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.free", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
-        return out.splitlines()[0] if out else ""
-    except (OSError, subprocess.SubprocessError, IndexError):
+def device_line(llama_server):
+    """One line describing the compute device, asked of llama-server itself.
+
+    Deliberately NOT nvidia-smi. That only exists on NVIDIA machines, and it
+    reports the card rather than what this llama.cpp BUILD can actually use -
+    a CUDA card with a Vulkan-only build is a real and confusing combination.
+    `--list-devices` is answered by the binary, so a CUDA build says CUDA0, a
+    ROCm build ROCm0, a Vulkan build Vulkan0, Metal on a Mac, and a CPU-only
+    build lists nothing - which is itself the correct thing to show."""
+    if not isinstance(llama_server, str):
         return ""
+    try:
+        out = subprocess.run([llama_server, "--list-devices"],
+                             capture_output=True, timeout=20).stdout or b""
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return parse_devices(out.decode(server.OEM, errors="replace"))
+
+
+def parse_devices(text):
+    """`--list-devices` output -> one display line. Pure, so it is testable
+    without running anything.
+
+    The shape is a header then one indented `NAME: description` per device:
+
+        Available devices:
+          CUDA0: NVIDIA GeForce RTX 4080 (16375 MiB, 15074 MiB free)
+
+    A CPU-only build prints the header and nothing else, which is not a failure
+    - it is the honest answer, and worth showing rather than leaving blank."""
+    devices = [line.strip() for line in text.splitlines()
+               if ":" in line and not line.strip().lower().startswith("available")]
+    return "  |  ".join(devices[:2]) if devices else "CPU only"
 
 
 def alias_of(cfg):
@@ -278,7 +379,7 @@ def run_board(data, cfg):
     dirty = set()
     root = data["model_root"]
     header = (f"{cfg['name']}\nModel: {os.path.basename(cfg['model'])}"
-              f"   |  {vram_line()}")
+              f"   |  {device_line(data['llama_server'])}")
 
     while True:
         print("\n" + board.render_board(values, dirty, header))
@@ -412,9 +513,41 @@ def main():
         return 0
 
 
+def first_run_fresh(model_root, llama_server):
+    """No config and nothing to migrate: write an empty document."""
+    if os.path.exists(CONFIG_PATH) or os.path.exists(LEGACY_PATH):
+        return True
+    doc = {"version": 2,
+           "model_root": model_root.replace("\\", "/"),
+           "llama_server": llama_server.replace("\\", "/"),
+           "defaults": {},
+           "configs": []}
+    try:
+        save_config(CONFIG_PATH, doc)
+    except config.ConfigError as exc:
+        print(f"  {exc}")
+        return False
+    found = len(scan_models(model_root))
+    print(f"  wrote {os.path.basename(CONFIG_PATH)}; found {found} model file(s).")
+    print("  Press [n] to build your first config.\n")
+    return True
+
+
 def _main():
-    if not first_run_migration():
-        return 1
+    # Ask for paths ONCE, and only when there is no config yet. Both setup
+    # paths need them; neither should prompt on its own.
+    if not os.path.exists(CONFIG_PATH):
+        legacy = None
+        if os.path.exists(LEGACY_PATH):
+            try:
+                legacy = load_config(LEGACY_PATH)
+            except config.ConfigError:
+                legacy = None          # migration reports this properly below
+        model_root, llama_server = first_run_setup(legacy)
+        if not first_run_migration(model_root, llama_server):
+            return 1
+        if not first_run_fresh(model_root, llama_server):
+            return 1
     try:
         data = load_config(CONFIG_PATH)
     except config.ConfigError as exc:
