@@ -131,5 +131,47 @@ class TestKillGuard(unittest.TestCase):
             server.kill(4321, "llama-server.exe")     # positional not allowed
 
 
+class FakeProc:
+    """Stands in for Popen. `dies_after` counts poll() calls before exit."""
+    def __init__(self, dies_after=None, returncode=1):
+        self.calls = 0
+        self.dies_after = dies_after
+        self.returncode = returncode
+
+    def poll(self):
+        self.calls += 1
+        if self.dies_after is not None and self.calls >= self.dies_after:
+            return self.returncode
+        return None
+
+
+class TestWaitReady(unittest.TestCase):
+    def test_reports_ready_once_the_port_accepts(self):
+        opens = iter([False, False, True])
+        ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(),
+                                    timeout=5, tick=lambda: None,
+                                    probe=lambda h, p: next(opens),
+                                    sleep=lambda s: None)
+        self.assertTrue(ok)
+
+    def test_reports_failure_when_the_process_dies(self):
+        ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(dies_after=2),
+                                    timeout=5, tick=lambda: None,
+                                    probe=lambda h, p: False,
+                                    sleep=lambda s: None)
+        self.assertFalse(ok)
+        self.assertIn("exited", msg)
+
+    def test_reports_failure_on_timeout(self):
+        clock = iter([0, 1, 2, 3, 999])
+        ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(),
+                                    timeout=5, tick=lambda: None,
+                                    probe=lambda h, p: False,
+                                    sleep=lambda s: None,
+                                    clock=lambda: next(clock))
+        self.assertFalse(ok)
+        self.assertIn("timed out", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

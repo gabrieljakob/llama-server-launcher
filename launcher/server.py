@@ -1,5 +1,8 @@
 """Process and port handling. The only module that touches running processes."""
+import socket
 import subprocess
+import sys
+import time
 
 
 def parse_netstat(text, port):
@@ -92,3 +95,35 @@ def kill(pid, *, expect_name, name_of=process_name, force=_force_kill):
     if not current or current.lower() != expect_name.lower():
         return False
     return force(pid)
+
+
+def port_open(host, port, timeout=0.5):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        return s.connect_ex((host, port)) == 0
+
+
+def wait_ready(host, port, proc, timeout=300, tick=None,
+               probe=port_open, sleep=time.sleep, clock=time.monotonic):
+    """Poll until the port accepts a connection. Condition-based, not a fixed
+    sleep: a 20 GB model takes far longer to load than a 1 GB one.
+
+    Returns (ok, message). The injected probe/sleep/clock keep this testable
+    without opening real sockets."""
+    start = clock()
+    while True:
+        if probe(host, port):
+            return True, f"http://{host}:{port}"
+        if proc.poll() is not None:
+            return False, (f"llama-server exited with code {proc.returncode} "
+                           f"before the port opened - check its console window")
+        if clock() - start > timeout:
+            return False, f"timed out after {timeout}s waiting for {host}:{port}"
+        if tick:
+            tick()
+        sleep(0.5)
+
+
+def spawn(argv):
+    flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+    return subprocess.Popen(argv, creationflags=flags)
