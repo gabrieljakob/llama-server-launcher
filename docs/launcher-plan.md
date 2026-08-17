@@ -20,7 +20,13 @@
 - **Test command, run from `C:\Users\Gabe\Desktop\Scripts`:**
   `python -m unittest discover -s tests -t . -v`
 - **Never launch a real llama-server in a test.** Tests use fixture strings and fake callables. A 20 GB model load is not a unit test.
-- **Every user-facing string must be ASCII.** This is a German Windows install and the console encoding is **cp1252, not UTF-8**. A non-ASCII character reaching `print()` raises `UnicodeEncodeError` and kills the launcher. Verified, not theoretical — an infinity sign in one bounds message crashed it. Non-ASCII is permitted only inside test *fixture data* (the `netstat` output in Task 6 genuinely contains an umlaut), never in a message the launcher prints. `__main__` widens stdout as a second line of defence; do not rely on that instead of keeping messages ASCII.
+- **Every string *we author* must be ASCII.** This is a German Windows install and the console encoding is **cp1252, not UTF-8**. A character outside cp1252 reaching `print()` raises `UnicodeEncodeError` and kills the launcher. Verified, not theoretical — an infinity sign in one bounds message crashed it.
+
+  The rule applies to **literals in our source**: prompts, error messages, labels, report text. Write those in ASCII.
+
+  It does **not** and cannot apply to **user data we interpolate** — model names, aliases, file paths, config keys. Those come off the user's disk and may contain anything; a Chinese or emoji-bearing model directory is entirely plausible. Code that builds a string around user data must never raise, and must not try to force that data to ASCII (mangling a filename is worse than displaying it oddly). Printability is handled centrally: `__main__` reconfigures stdout and stderr to UTF-8 with `errors="replace"` before anything runs. Functions that *return* text for later printing — such as the migration report — are correct to pass user data through verbatim.
+
+  Non-ASCII is also permitted in test *fixture data* (Task 6's `netstat` output genuinely contains an umlaut).
 
 ---
 
@@ -962,6 +968,61 @@ class TestMigration(unittest.TestCase):
         _, report = self.migrate()
         self.assertTrue(any("dspark" in line and "draft" in line.lower()
                             for line in report))
+
+    def test_input_profiles_dict_is_not_mutated(self):
+        """The caller may still be holding this dict. Migration reads only."""
+        import copy
+        before = copy.deepcopy(self.PROFILES)
+        self.migrate()
+        self.assertEqual(self.PROFILES, before)
+
+
+class TestMigrationRobustness(unittest.TestCase):
+    """Migration runs once, unattended, against the user's only config file.
+    A partial or hand-edited entry must degrade, not abort."""
+
+    ROOT = "D:/LLM Models"
+    EXE = "D:/llama.cpp/llama-server.exe"
+
+    def migrate(self, profiles):
+        return config.migrate(profiles, self.ROOT, self.EXE)
+
+    def test_entry_without_a_path_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": "good", "alias": "good", "path": "D:/LLM Models/a/b.gguf"},
+            {"name": "broken", "alias": "broken"},
+        ]})
+        self.assertEqual([c["name"] for c in doc["configs"]], ["good"])
+        self.assertTrue(any("SKIPPED" in line and "path" in line for line in report))
+
+    def test_entry_without_a_name_is_skipped_not_fatal(self):
+        doc, report = self.migrate({"defaults": {},
+                                    "models": [{"path": "D:/LLM Models/a/b.gguf"}]})
+        self.assertEqual(doc["configs"], [])
+        self.assertTrue(any("SKIPPED" in line for line in report))
+
+    def test_uninterpretable_flash_attn_is_dropped_with_a_warning(self):
+        doc, report = self.migrate({"defaults": {"flash_attn": "yes please"},
+                                    "models": []})
+        self.assertNotIn("flash_attn", doc["defaults"])
+        self.assertTrue(any("WARNING" in line and "flash_attn" in line
+                            for line in report))
+
+    def test_an_already_valid_flash_attn_string_passes_through(self):
+        doc, _ = self.migrate({"defaults": {"flash_attn": "auto"}, "models": []})
+        self.assertEqual(doc["defaults"]["flash_attn"], "auto")
+
+    def test_non_ascii_model_name_survives_migration(self):
+        """Model names are user data off the user's disk and may contain
+        anything. migrate() must carry them through verbatim without raising and
+        without mangling them; making them printable is __main__'s job, via its
+        stdout reconfigure. See the Global Constraints note on authored strings
+        versus interpolated user data."""
+        name = "\u4e2d\u6587-model"
+        doc, report = self.migrate({"defaults": {}, "models": [
+            {"name": name, "alias": name, "path": "D:/LLM Models/a/b.gguf"}]})
+        self.assertEqual(doc["configs"][0]["name"], name)
+        self.assertTrue(any(name in line for line in report))
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -982,7 +1043,9 @@ _MIGRATE_KEYS = {"ngl": "gpu_layers", "context": "context", "host": "host",
 _LIKELY_DRAFT = ("dflash", "dspark")
 
 
-def _migrate_settings(old):
+def _migrate_settings(old, where, report):
+    """Old-format settings -> catalog keys. Unmapped keys are dropped silently;
+    values we cannot interpret are dropped loudly, into `report`."""
     out = {}
     for old_key, value in (old or {}).items():
         key = _MIGRATE_KEYS.get(old_key)
@@ -991,25 +1054,49 @@ def _migrate_settings(old):
         if key == "gpu_layers":
             value = str(value)
         elif key == "flash_attn":
-            value = "on" if value is True else ("off" if value is False else value)
+            # The old format wrote a bool. A hand-edited file might hold anything;
+            # guessing an intent would emit an invalid flag value that only fails
+            # much later, at server start, with nothing pointing back to here.
+            if isinstance(value, bool):
+                value = "on" if value else "off"
+            elif value not in ("on", "off", "auto"):
+                report.append(
+                    f"  WARNING: {where} had flash_attn={value!r}, which is neither a "
+                    f"bool nor one of on/off/auto. Dropped; the default applies.")
+                continue
         out[key] = value
     return out
 
 
 def migrate(profiles, model_root, llama_server):
-    """model_profiles.json -> the v2 document. Returns (document, report lines)."""
+    """model_profiles.json -> the v2 document. Returns (document, report lines).
+
+    Never mutates `profiles`, and never touches model_profiles.json on disk: that
+    file is the user's rollback path."""
     report = []
     doc = {"version": 2, "model_root": model_root, "llama_server": llama_server,
-           "defaults": _migrate_settings(profiles.get("defaults")), "configs": []}
+           "defaults": _migrate_settings(profiles.get("defaults"), "defaults", report),
+           "configs": []}
 
-    for entry in profiles.get("models", []):
+    for index, entry in enumerate(profiles.get("models", []), 1):
         name = entry.get("alias") or entry.get("name")
-        model = relativise(entry["path"].replace("/", os.sep), model_root)
+        path = entry.get("path")
+        # A partial or hand-edited entry must not abort the whole migration -
+        # this runs once, on the user's only config, and losing five good
+        # configs to one malformed sixth would be a poor trade.
+        if not path or not name:
+            missing = "path" if not path else "name/alias"
+            report.append(f"  SKIPPED entry {index}: no {missing}. "
+                          f"Other entries were unaffected.")
+            continue
+
+        model = relativise(path.replace("/", os.sep), model_root)
         doc["configs"].append({
             "name": name,
             "model": model,
             "alias": entry.get("alias") or name,
-            "settings": _migrate_settings(entry.get("overrides")),
+            "settings": _migrate_settings(entry.get("overrides"), f"config {name!r}",
+                                          report),
         })
         report.append(f"  migrated config {name!r} -> {model}")
         if any(hint in model.lower() for hint in _LIKELY_DRAFT):
