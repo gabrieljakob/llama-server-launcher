@@ -5,3 +5,11 @@ __pycache__/
 # Subagent-driven-development scratch: ledger, briefs, review packages.
 # Regenerable; the git history is the real record.
 .sdd/
+
+# Local machine state: absolute paths to your llama-server binary and model
+# folder. Written on first run; must not be shared, or a clone would inherit
+# someone else's paths and skip setup entirely.
+launcher_configs.json
+
+# Legacy pre-v2 profiles, kept on disk as a migration source and rollback.
+model_profiles.json
