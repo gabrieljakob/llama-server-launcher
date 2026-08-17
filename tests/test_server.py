@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+import socket
+import subprocess
+import sys
 import unittest
 
 from launcher import server
@@ -152,15 +155,32 @@ class TestWaitReady(unittest.TestCase):
                                     timeout=5, tick=lambda: None,
                                     probe=lambda h, p: next(opens),
                                     sleep=lambda s: None)
-        self.assertTrue(ok)
+        # assertIs, not assertTrue: a swapped return of (msg, ok) would make ok a
+        # non-empty string, which assertTrue accepts. And the message is checked
+        # because callers print it - a wrong tuple order would print "-> True".
+        self.assertIs(ok, True)
+        self.assertEqual(msg, "http://127.0.0.1:8080")
+
+    def test_tick_is_called_while_waiting(self):
+        """Without this, deleting the tick call ships silently - and the user
+        watches a frozen screen for the minutes a 20 GB model takes to load,
+        with no way to tell it apart from a hang."""
+        ticks = []
+        opens = iter([False, False, True])
+        server.wait_ready("127.0.0.1", 8080, FakeProc(),
+                          timeout=5, tick=lambda: ticks.append(1),
+                          probe=lambda h, p: next(opens),
+                          sleep=lambda s: None)
+        self.assertEqual(len(ticks), 2)      # two waits before the third probe
 
     def test_reports_failure_when_the_process_dies(self):
         ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(dies_after=2),
                                     timeout=5, tick=lambda: None,
                                     probe=lambda h, p: False,
                                     sleep=lambda s: None)
-        self.assertFalse(ok)
+        self.assertIs(ok, False)
         self.assertIn("exited", msg)
+        self.assertIn("1", msg)              # the child's return code
 
     def test_reports_failure_on_timeout(self):
         clock = iter([0, 1, 2, 3, 999])
@@ -169,8 +189,55 @@ class TestWaitReady(unittest.TestCase):
                                     probe=lambda h, p: False,
                                     sleep=lambda s: None,
                                     clock=lambda: next(clock))
-        self.assertFalse(ok)
+        self.assertIs(ok, False)
         self.assertIn("timed out", msg)
+
+
+class TestPortOpen(unittest.TestCase):
+    """Uses a loopback socket the test binds and closes itself: instant,
+    deterministic, no network. A fake here would only test the fake."""
+
+    def free_port(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_true_when_something_is_listening(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        self.assertTrue(server.port_open("127.0.0.1", srv.getsockname()[1]))
+
+    def test_false_when_nothing_is_listening(self):
+        self.assertFalse(server.port_open("127.0.0.1", self.free_port()))
+
+
+class TestSpawn(unittest.TestCase):
+    """popen is injected: the platform guard and argument handling are worth
+    testing, starting a real console window is not."""
+
+    def test_passes_argv_as_a_list_and_never_uses_a_shell(self):
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            seen["argv"] = argv
+            seen["kwargs"] = kwargs
+            return "proc"
+
+        result = server.spawn(["a.exe", "--flag", "value with spaces"],
+                              popen=fake_popen)
+        self.assertEqual(result, "proc")
+        self.assertEqual(seen["argv"], ["a.exe", "--flag", "value with spaces"])
+        self.assertNotIn("shell", seen["kwargs"])
+
+    def test_requests_its_own_console_on_windows(self):
+        seen = {}
+        server.spawn(["a.exe"], popen=lambda argv, **kw: seen.update(kw))
+        expected = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+        self.assertEqual(seen["creationflags"], expected)
 
 
 if __name__ == "__main__":

@@ -124,6 +124,10 @@ def wait_ready(host, port, proc, timeout=300, tick=None,
         sleep(0.5)
 
 
-def spawn(argv):
+def spawn(argv, popen=subprocess.Popen):
+    """Start llama-server in its own console window.
+
+    `popen` is injectable so the platform guard and argument handling can be
+    tested without actually starting a process."""
     flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-    return subprocess.Popen(argv, creationflags=flags)
+    return popen(argv, creationflags=flags)
