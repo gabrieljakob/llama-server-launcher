@@ -388,10 +388,11 @@ class LaunchFixture(unittest.TestCase):
         v.update(over)
         return v
 
-    def launch(self, values, owner=None, ask=None, wait=None, spawn=KEEP):
+    def launch(self, values, owner=None, ask=None, wait=None, spawn=KEEP,
+               kill=True):
         """Returns (result, printed text, calls). Nothing real is started."""
         calls = {"owner_port": [], "wait_port": [], "killed": [], "asked": [],
-                 "spawned": []}
+                 "spawned": [], "kill_args": []}
 
         def fake_owner(port):
             calls["owner_port"].append(port)
@@ -405,7 +406,8 @@ class LaunchFixture(unittest.TestCase):
 
         def fake_kill(pid, **kw):
             calls["killed"].append(pid)
-            return True
+            calls["kill_args"].append(kw)
+            return kill
 
         def fake_wait(host, port, proc, **kw):
             calls["wait_port"].append(port)
@@ -427,26 +429,111 @@ class LaunchFixture(unittest.TestCase):
 
 
 class TestPortOwnerIdentity(LaunchFixture):
+    """What counts as 'our' llama-server: a process whose name equals the file
+    name of the binary in the config. Not a literal, and never a substring."""
+
+    def owner(self, name):
+        return server.Owner(4321, name, 1000.5)
+
     def test_a_process_whose_name_merely_contains_llama_server_is_not_ours(self):
-        """"llama-server-proxy.exe" contains "llama-server", so a substring test
-        offered somebody else's process up for a force-kill. tasklist gives the
-        image name and nothing else, so equality is the whole identity we have."""
-        result, text, calls = self.launch(self.values(),
-                                          owner=server.Owner(4321, "llama-server-proxy.exe", 1000.5))
+        """"llama-server-proxy.exe" contains "llama-server", so a substring
+        test offered somebody else's process up for a stop."""
+        result, text, calls = self.launch(
+            self.values(), owner=self.owner("llama-server-proxy.exe"))
         self.assertIs(result, False)
         self.assertIn("not a llama-server", text)
         self.assertEqual(calls["asked"], [], "must not have offered to stop it")
         self.assertEqual(calls["killed"], [])
 
-    def test_the_real_llama_server_is_still_recognised(self):
+    def test_the_configured_binary_is_recognised(self):
         """Otherwise 'never match' would pass the test above and the launcher
         could never take back its own port."""
-        result, text, calls = self.launch(self.values(),
-                                          owner=server.Owner(4321, "LLAMA-SERVER.EXE", 1000.5),
-                                          ask="y")
+        result, text, calls = self.launch(
+            self.values(), owner=self.owner("llama-server.exe"), ask="y")
         self.assertIs(result, True)
         self.assertEqual(calls["killed"], [4321])
         self.assertNotIn("not a llama-server", text)
+
+    @unittest.skipUnless(os.name == "nt", "file names fold case on Windows only")
+    def test_the_match_ignores_case_on_windows(self):
+        result, _, calls = self.launch(
+            self.values(), owner=self.owner("LLAMA-SERVER.EXE"), ask="y")
+        self.assertIs(result, True)
+        self.assertEqual(calls["killed"], [4321])
+
+    @unittest.skipIf(os.name == "nt", "file names are case-sensitive off Windows")
+    def test_the_match_is_exact_off_windows(self):
+        result, text, calls = self.launch(
+            self.values(), owner=self.owner("LLAMA-SERVER.EXE"))
+        self.assertIs(result, False)
+        self.assertIn("not a llama-server", text)
+        self.assertEqual(calls["killed"], [])
+
+    def test_a_binary_under_another_name_is_recognised_by_that_name(self):
+        self.data["llama_server"] = "/opt/llama/bin/llama-server-vulkan"
+        result, _, calls = self.launch(
+            self.values(), owner=self.owner("llama-server-vulkan"), ask="y")
+        self.assertIs(result, True)
+        self.assertEqual(calls["killed"], [4321])
+
+    def test_the_standard_name_is_not_ours_when_another_binary_is_configured(self):
+        """The check follows the config, not a built-in idea of the name."""
+        self.data["llama_server"] = "/opt/llama/bin/llama-server-vulkan"
+        result, text, calls = self.launch(
+            self.values(), owner=self.owner("llama-server"))
+        self.assertIs(result, False)
+        self.assertIn("not a llama-server", text)
+        self.assertEqual(calls["killed"], [])
+
+    def test_the_stop_is_asked_to_verify_name_start_time_and_port(self):
+        """All three guards, from the one production call site. kill() could
+        always re-check the port; nothing ever asked it to."""
+        _, _, calls = self.launch(
+            self.values(port=8082), owner=self.owner("llama-server.exe"), ask="y")
+        self.assertEqual(calls["kill_args"],
+                         [{"expect_name": "llama-server.exe",
+                           "expect_started": 1000.5,
+                           "expect_port": 8082}])
+
+    def test_a_stop_that_is_refused_ends_the_launch_and_starts_nothing(self):
+        result, text, calls = self.launch(
+            self.values(), owner=self.owner("llama-server.exe"), ask="y",
+            kill=False)
+        self.assertIs(result, False)
+        self.assertIn("was not stopped", text)
+        self.assertEqual(calls["spawned"], [])
+
+
+class TestIsLlamaServer(unittest.TestCase):
+    def test_equal_names_match(self):
+        self.assertIs(
+            main.is_llama_server("llama-server", "/usr/local/bin/llama-server"),
+            True)
+
+    def test_a_longer_or_shorter_name_does_not_match(self):
+        for name in ("llama-server-proxy", "xllama-server", "llama-serve"):
+            with self.subTest(name=name):
+                self.assertIs(
+                    main.is_llama_server(name, "/usr/local/bin/llama-server"),
+                    False)
+
+    def test_the_folder_of_the_binary_is_ignored(self):
+        self.assertIs(
+            main.is_llama_server("llama-server.exe",
+                                 "D:/llama.cpp/build/bin/llama-server.exe"),
+            True)
+
+    def test_a_value_that_is_not_a_string_is_never_a_match(self):
+        """llama_server comes from a hand-edited file and the name from a
+        lookup that can fail; neither may raise here."""
+        for name, exe in ((None, "/x/llama-server"), ("llama-server", 5),
+                          ("llama-server", None), (5, 5)):
+            with self.subTest(name=name, exe=exe):
+                self.assertIs(main.is_llama_server(name, exe), False)
+
+    def test_an_empty_name_is_never_a_match(self):
+        self.assertIs(main.is_llama_server("", "/x/llama-server"), False)
+        self.assertIs(main.is_llama_server("", "/x/folder/"), False)
 
 
 class TestPortIsUsableBeforeAnythingStarts(LaunchFixture):

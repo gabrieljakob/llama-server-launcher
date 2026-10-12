@@ -222,7 +222,9 @@ def device_line(llama_server):
                              capture_output=True, timeout=20).stdout or b""
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
-    return parse_devices(out.decode(server.OEM, errors="replace"))
+    # llama-server writes UTF-8. errors="replace" because this is a display
+    # line called on every board render, and must never raise.
+    return parse_devices(out.decode("utf-8", errors="replace"))
 
 
 def parse_devices(text):
@@ -288,6 +290,26 @@ def host_error(host, port):
     return None
 
 
+def is_llama_server(name, llama_server):
+    """Whether a process called `name` is the configured llama-server binary.
+
+    Compared with the FILE NAME of the binary in the config, so it is right on
+    every OS without a table of names ("llama-server.exe" here, "llama-server"
+    there) and right for a user whose build is called something else.
+
+    Equality, never a substring: "llama-server-proxy" contains "llama-server"
+    and would have been offered up for a stop as though it were ours. normcase
+    folds case on Windows, where file names are case-insensitive, and leaves it
+    alone everywhere else.
+
+    Both arguments come from places a hand edit or a failed lookup can reach,
+    so anything that is not a non-empty string is simply not a match."""
+    if not isinstance(name, str) or not isinstance(llama_server, str):
+        return False
+    expected = os.path.basename(llama_server)
+    return bool(expected) and os.path.normcase(name) == os.path.normcase(expected)
+
+
 def launch(data, cfg, values):
     """Returns True only if a server is actually up. Every failure path returns
     False so run_board can keep the board - and the user's unsaved edits - up."""
@@ -337,35 +359,33 @@ def launch(data, cfg, values):
         values, model_path, alias_of(cfg), draft_path)
 
     owner = server.port_owner(port)
-    if owner and owner[0] is None:
-        # port_owner's third answer: netstat could not be asked, so the port's
-        # state is unknown. Not evidence that it is busy, and not evidence that
-        # it is free - saying "held by unknown (pid None)" would be neither.
-        # Going on is the honest choice: llama-server refuses to start on a
-        # taken port, and wait_ready reports that as an exit code.
+    if owner and owner.pid is None:
+        # port_owner's third answer: the lookup could not be made, so the
+        # port's state is unknown. Not evidence that it is busy, and not
+        # evidence that it is free - saying "held by unknown (pid None)" would
+        # be neither. Going on is the honest choice: llama-server refuses to
+        # start on a taken port, and wait_ready reports that as an exit code.
         print(f"  could not check whether port {port} is free - starting anyway")
         owner = None
     if owner:
-        pid, name = owner.pid, owner.name
-        # Exact image name, not a substring: "llama-server-proxy.exe" contains
-        # "llama-server" and would have been offered up for a force-kill as
-        # though it were ours. tasklist reports the image name alone, so an
-        # equality test is the whole identity we have.
-        if name.lower() != "llama-server.exe":
-            print(f"\n  port {port} is held by {name} (pid {pid}), not a "
-                  f"llama-server. Change the port on row 3.\n")
+        if not is_llama_server(owner.name, data["llama_server"]):
+            print(f"\n  port {port} is held by {owner.name} (pid {owner.pid}), "
+                  f"not a llama-server. Change the port on row 3.\n")
             return False
-        if ask(f"  port {port} is held by llama-server (pid {pid}). "
+        if ask(f"  port {port} is held by llama-server (pid {owner.pid}). "
                f"Stop it? [Y/n] ").strip().lower() in ("", "y"):
-            # expect_name re-checks identity at kill time. The snapshot above is
-            # as old as the user's pause at this prompt, and Windows recycles
-            # pids - without this, a server that exited meanwhile could hand its
-            # pid to something unrelated that we would then force-kill.
-            if not server.kill(pid, expect_name=name):
-                print(f"  pid {pid} is no longer {name} - not killing it. "
-                      f"Re-check the port and try again.")
+            # All three guards, re-checked at the moment of the stop. The
+            # snapshot above is as old as the user's pause at this prompt, and
+            # pids are recycled - without the name and the start time, a server
+            # that exited meanwhile could hand its pid to something unrelated;
+            # without the port, to another llama-server we never meant.
+            if not server.kill(owner.pid, expect_name=owner.name,
+                               expect_started=owner.started, expect_port=port):
+                print(f"  pid {owner.pid} was not stopped - it is no longer the "
+                      f"{owner.name} that held port {port}, or stopping it was "
+                      f"refused. Re-check the port and try again.")
                 return False
-            print(f"  stopped pid {pid}")
+            print(f"  stopped pid {owner.pid}")
         else:
             return False
 

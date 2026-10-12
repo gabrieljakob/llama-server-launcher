@@ -8,25 +8,6 @@ import time
 import psutil
 
 
-# Every console tool used here (tasklist, netstat, taskkill) prints in the
-# console OEM codepage, not the ANSI codepage Python's text=True assumes.
-#
-# On this German Windows, tasklist's no-match line is
-#   "INFORMATION: Es werden keine Aufgaben ... ausgefuehrt."
-# where the "ue" is really U+00FC: byte 0x81 in the OEM codepage, and UNDEFINED
-# in cp1252. With text=True that decode blows up inside subprocess's reader
-# THREAD - so the traceback prints to stderr, .stdout comes back None, and no
-# try/except wrapped around subprocess.run ever sees it. parse_tasklist(None)
-# then raised AttributeError on EVERY dead pid, taking out the guard on the
-# kill path. netstat and taskkill are localised the same way.
-#
-# encoding=OEM is the fix. errors="replace" is the belt to that braces: it makes
-# a decode failure structurally impossible, so the reader thread can never die
-# and hand us None again. Only ASCII fields (image names, pids, ports) are ever
-# parsed out of this text, so a replacement character in localised prose is
-# harmless.
-OEM = "oem" if sys.platform == "win32" else "utf-8"
-
 UNKNOWN = "unknown"
 
 # Who holds a port: the pid, the process name, and the moment that process was
@@ -39,22 +20,6 @@ Owner = collections.namedtuple("Owner", "pid name started")
 # is genuinely free") - a failed query is not evidence of a free port, and the
 # caller must be able to tell them apart.
 UNKNOWN_OWNER = Owner(None, UNKNOWN, None)
-
-
-def _console(argv, timeout, run=subprocess.run):
-    """Run a Windows console tool, decoding its OEM-codepage output.
-
-    Returns the CompletedProcess, or None if the tool could not be run at all.
-    Every console call in this module goes through here, so the OEM decode
-    cannot be fixed in one place and forgotten in another.
-
-    `run` is injectable so each call site's exact argv can be asserted in tests
-    without running anything real."""
-    try:
-        return run(argv, capture_output=True, encoding=OEM, errors="replace",
-                   timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 def process_name(pid, ps=psutil):
@@ -178,53 +143,88 @@ def port_owner(port, ps=psutil, probe=None):
     return Owner(pid, name, process_started(pid, ps=ps))
 
 
-def _force_kill(pid, run=subprocess.run):
-    """The actual taskkill. Separated so kill()'s guard can be tested without
-    terminating anything real.
+# How long a server gets to shut down after being asked, before it is forced.
+STOP_GRACE = 5
 
-    Targets one pid with /PID. Never /IM: an image-name kill would take out
+
+def _stop(pid, ps=psutil, grace=STOP_GRACE):
+    """Stop one process: ask, wait, then force. True if it is not running
+    afterwards. Separated from kill() so the guards can be tested without
+    stopping anything real.
+
+    Addresses exactly one pid, never a name: stopping by name would take out
     every llama-server on the machine, including ones this launcher never
-    started and the user is still using."""
-    r = _console(["taskkill", "/PID", str(pid), "/F"], 20, run)
-    return r is not None and r.returncode == 0
+    started and the user is still using.
+
+    terminate() is TerminateProcess on Windows - what `taskkill /F` did - and
+    SIGTERM elsewhere, where llama-server gets `grace` seconds to release the
+    GPU and exit before SIGKILL.
+
+    A process that is already gone counts as stopped: the outcome the caller
+    needs, nothing running under that pid, holds."""
+    try:
+        proc = ps.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=grace)
+        except ps.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=grace)
+        return True
+    except ps.NoSuchProcess:
+        return True
+    except (ps.Error, OSError):
+        # Refused (AccessDenied), or still alive after the force - the second
+        # wait's TimeoutExpired lands here.
+        return False
 
 
-def kill(pid, *, expect_name, expect_port=None, name_of=process_name,
-         force=_force_kill, owner_of=port_owner):
-    """Force-stop `pid`, but only if it is still `expect_name`. Returns True
-    only if it was actually killed.
+def kill(pid, *, expect_name, expect_started, expect_port=None,
+         name_of=process_name, started_of=process_started, force=_stop,
+         owner_of=port_owner):
+    """Stop `pid`, but only if it is provably the process the caller means.
+    Returns True only if it was stopped.
 
-    `expect_name` is REQUIRED and keyword-only, deliberately. A default of None
-    would mean a caller who forgets it silently gets unguarded killing, and the
-    whole point of this function is that killing blind is unsafe: port_owner's
-    snapshot can be minutes old by the time a user answers a confirmation
-    prompt, and Windows recycles pids. Every call site must state what it
-    believes it is killing.
+    `expect_name` and `expect_started` are REQUIRED and keyword-only,
+    deliberately. A default of None would mean a caller who forgets one
+    silently gets a weaker guard, and the whole point of this function is that
+    stopping blind is unsafe: port_owner's snapshot can be minutes old by the
+    time a user answers a confirmation prompt, and operating systems recycle
+    pids. Every call site must state what it believes it is stopping.
 
-    Refuses on a name mismatch, on "" (already gone) and on "unknown" (tasklist
-    failed) - not knowing is not permission.
+    Three guards, each closing what the one before leaves open:
 
-    THE REMAINING RACE, and it is real: the name check proves the pid is *a*
-    llama-server, not *the* llama-server that held the port. Between port_owner's
-    snapshot and here, the original could exit and a DIFFERENT llama-server (say,
-    one the user started by hand) could take both the pid and the port. Passing
-    `expect_port` closes most of that window by re-confirming, immediately before
-    the kill, that this pid still owns the port we mean to free; it refuses if
-    netstat cannot say. It cannot close the window completely - any check ends
-    some microseconds before the taskkill, and only a kernel handle held from
-    before the snapshot could make identity atomic. Narrower, honestly, is the
-    best this pair of console tools can do.
+      - NAME. Refuses unless the pid still runs under `expect_name`. Refuses on
+        "" (already gone) and on "unknown" (could not ask) - not knowing is not
+        permission. This proves the pid is *a* llama-server.
 
-    `name_of`, `force` and `owner_of` are injectable so both the refuse path AND
-    the proceed path are testable without terminating a real process."""
+      - START TIME. Refuses unless the pid's creation time still equals
+        `expect_started`, the value port_owner recorded. A recycled pid has a
+        different creation time, so it is refused even when the newcomer is
+        also a llama-server - the case the name cannot see. Refuses when either
+        reading is None: an owner we could not timestamp is one we cannot
+        re-identify.
+
+      - PORT (opt-in). With `expect_port`, re-confirms immediately before
+        stopping that this pid still owns that port, and refuses if the lookup
+        cannot say.
+
+    What remains is the gap between the last check and the stop itself, which
+    only a handle held from before the snapshot could close.
+
+    `name_of`, `started_of`, `force` and `owner_of` are injectable so both the
+    refuse paths AND the proceed path are testable without stopping a real
+    process."""
     current = name_of(pid)
     if not current or current.lower() != expect_name.lower():
         return False
+    if expect_started is None or started_of(pid) != expect_started:
+        return False
     if expect_port is not None:
         owner = owner_of(expect_port)
-        # None (port went free), UNKNOWN_OWNER (netstat failed) and a different
+        # None (port went free), UNKNOWN_OWNER (could not ask) and a different
         # pid all mean the same thing here: this is not provably the process
-        # that holds the port, so it is not ours to kill.
+        # that holds the port, so it is not ours to stop.
         if not owner or owner[0] != pid:
             return False
     return force(pid)

@@ -8,6 +8,7 @@ piece of untested startup code in this project - host_error - shipped a crash.
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from llama_launcher import __main__ as main
 
@@ -69,6 +70,16 @@ class TestDeviceLine(unittest.TestCase):
         for bad in (None, 5, ["x"]):
             with self.subTest(bad=bad):
                 self.assertEqual(main.device_line(bad), "")
+
+    def test_a_device_name_outside_ascii_is_read_as_utf8(self):
+        """llama-server writes UTF-8. The console codepage this used to be
+        decoded with belonged to netstat and tasklist, not to llama-server."""
+        class Done:
+            stdout = ("Available devices:\n"
+                      "  Vulkan0: Ger\u00e4t (1 MiB)\n").encode("utf-8")
+
+        with mock.patch.object(main.subprocess, "run", lambda *a, **k: Done()):
+            self.assertIn("Ger\u00e4t", main.device_line("llama-server"))
 
 
 class TestGuessModelRoot(unittest.TestCase):

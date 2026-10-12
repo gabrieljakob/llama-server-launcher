@@ -278,95 +278,88 @@ class TestPortOwnerWithoutTheSystemTable(unittest.TestCase):
         self.assertEqual(asked, [("127.0.0.1", 8080)])
 
 
-class Completed:
-    """Minimal stand-in for subprocess.CompletedProcess."""
+class Stoppable:
+    """A fake psutil.Process for the stop sequence. `waits` scripts each wait()
+    call in order: None means it exited in time, an exception is raised."""
 
-    def __init__(self, stdout="", returncode=0):
-        self.stdout = stdout
-        self.stderr = ""
-        self.returncode = returncode
+    def __init__(self, waits=(None,), terminate_error=None, kill_error=None):
+        self.pid = 4321
+        self.calls = []
+        self._waits = list(waits)
+        self._terminate_error = terminate_error
+        self._kill_error = kill_error
 
+    def terminate(self):
+        self.calls.append("terminate")
+        if self._terminate_error is not None:
+            raise self._terminate_error
 
-class FakeRun:
-    """Stands in for subprocess.run: records the exact argv and kwargs of the
-    taskkill call. Removed with taskkill itself in the next task."""
+    def kill(self):
+        self.calls.append("kill")
+        if self._kill_error is not None:
+            raise self._kill_error
 
-    def __init__(self, raises=None, **answers):
-        self.calls = []                  # (argv, kwargs) per call, in order
-        self.raises = raises
-        self.answers = answers
-
-    def __call__(self, argv, **kwargs):
-        self.calls.append((argv, kwargs))
-        if self.raises is not None:
-            raise self.raises
-        return self.answers.get(argv[0], Completed())
-
-    def argv(self, tool):
-        for argv, _ in self.calls:
-            if argv[0] == tool:
-                return argv
-        raise AssertionError(f"{tool} was never run; ran {self.tools()}")
-
-    def kwargs(self, tool):
-        for argv, kwargs in self.calls:
-            if argv[0] == tool:
-                return kwargs
-        raise AssertionError(f"{tool} was never run; ran {self.tools()}")
-
-    def tools(self):
-        return [argv[0] for argv, _ in self.calls]
+    def wait(self, timeout=None):
+        self.calls.append(("wait", timeout))
+        outcome = self._waits.pop(0)
+        if outcome is not None:
+            raise outcome
 
 
-class TestConsoleDecoding(unittest.TestCase):
-    """taskkill is the last console tool on this path, and the next task
-    replaces it. Until then its output is still OEM-encoded and it can still
-    hang, so both guarantees stay under test."""
+class TestStop(unittest.TestCase):
+    """The one function that actually ends a process."""
 
-    def test_taskkill_decodes_with_the_oem_codepage(self):
-        run = FakeRun(taskkill=Completed(""))
-        server._force_kill(4321, run=run)
-        self.assertEqual(run.kwargs("taskkill")["encoding"], server.OEM)
-        self.assertEqual(run.kwargs("taskkill")["errors"], "replace")
+    def stop(self, proc):
+        ps = FakePs(procs=[proc])
+        return server._stop(4321, ps=ps), ps
 
-    @unittest.skipUnless(sys.platform == "win32", "OEM is a Windows codepage")
-    def test_oem_is_the_console_codepage_not_the_ansi_one(self):
-        self.assertEqual(server.OEM, "oem")
+    def test_targets_exactly_one_pid(self):
+        """THE regression this project exists to prevent. Stopping by name
+        looks like a success while ending every llama-server on the machine -
+        including ones the user started by hand and is still using."""
+        _, ps = self.stop(Stoppable())
+        self.assertEqual(ps.calls, [("Process", 4321)])
 
-    def test_taskkill_has_a_timeout(self):
-        run = FakeRun(taskkill=Completed(""))
-        server._force_kill(4321, run=run)
-        self.assertGreater(run.kwargs("taskkill")["timeout"], 0)
+    def test_asks_first_and_does_not_force_a_process_that_exits_in_time(self):
+        proc = Stoppable(waits=[None])
+        result, _ = self.stop(proc)
+        self.assertIs(result, True)
+        self.assertEqual(server.STOP_GRACE, 5)
+        self.assertEqual(proc.calls, ["terminate", ("wait", 5)])
 
+    def test_forces_only_after_the_grace_period(self):
+        proc = Stoppable(waits=[psutil.TimeoutExpired(5), None])
+        result, _ = self.stop(proc)
+        self.assertIs(result, True)
+        self.assertEqual(proc.calls,
+                         ["terminate", ("wait", 5), "kill", ("wait", 5)])
 
-class TestForceKill(unittest.TestCase):
-    """The one function that actually terminates a process, previously with no
-    test of the command it runs."""
+    def test_false_when_it_survives_even_the_force(self):
+        proc = Stoppable(waits=[psutil.TimeoutExpired(5), psutil.TimeoutExpired(5)])
+        result, _ = self.stop(proc)
+        self.assertIs(result, False)
 
-    def test_targets_one_pid_and_never_an_image_name(self):
-        """THE regression this project exists to prevent. `taskkill /IM
-        llama-server.exe` exits 0 and looks like a success while killing every
-        llama-server on the machine - including ones the user started by hand
-        and is still using. Only a /PID argv is acceptable."""
-        run = FakeRun(taskkill=Completed(""))
-        server._force_kill(4321, run=run)
-        argv = run.argv("taskkill")
-        self.assertEqual(argv, ["taskkill", "/PID", "4321", "/F"])
-        self.assertNotIn("/IM", argv)
-        self.assertNotIn("llama-server.exe", argv)
+    def test_false_when_the_os_refuses(self):
+        proc = Stoppable(terminate_error=psutil.AccessDenied(4321))
+        result, _ = self.stop(proc)
+        self.assertIs(result, False)
+        self.assertEqual(proc.calls, ["terminate"])
 
-    def test_true_only_on_a_zero_exit(self):
-        self.assertIs(server._force_kill(4321, run=FakeRun(taskkill=Completed(""))),
-                      True)
+    def test_a_process_that_is_already_gone_counts_as_stopped(self):
+        """Nothing is running under that pid, which is what the caller asked
+        for. FakePs raises NoSuchProcess for a pid it does not hold."""
+        self.assertIs(server._stop(4321, ps=FakePs()), True)
 
-    def test_false_when_taskkill_refuses(self):
-        """Access denied, or the pid was already gone: nothing was killed."""
-        run = FakeRun(taskkill=Completed("", returncode=1))
-        self.assertIs(server._force_kill(4321, run=run), False)
+    def test_a_process_that_exits_between_the_two_steps_counts_as_stopped(self):
+        proc = Stoppable(waits=[psutil.TimeoutExpired(5)],
+                         kill_error=psutil.NoSuchProcess(4321))
+        result, _ = self.stop(proc)
+        self.assertIs(result, True)
 
-    def test_false_when_taskkill_cannot_be_run(self):
-        self.assertIs(server._force_kill(4321, run=FakeRun(raises=OSError())),
-                      False)
+    def test_an_os_error_is_false(self):
+        proc = Stoppable(terminate_error=OSError("boom"))
+        result, _ = self.stop(proc)
+        self.assertIs(result, False)
 
 
 class TestKillGuard(unittest.TestCase):
@@ -377,10 +370,11 @@ class TestKillGuard(unittest.TestCase):
     Every test here injects both `name_of` and `force`, so nothing real dies."""
 
     def kill(self, reported, expect="llama-server.exe"):
-        """Returns (result, pids actually passed to the killer)."""
+        """Returns (result, pids actually passed to the stopper)."""
         killed = []
-        result = server.kill(4321, expect_name=expect,
+        result = server.kill(4321, expect_name=expect, expect_started=1000.5,
                              name_of=lambda pid: reported,
+                             started_of=lambda pid: 1000.5,
                              force=lambda pid: killed.append(pid) or True)
         return result, killed
 
@@ -432,9 +426,9 @@ class TestKillGuard(unittest.TestCase):
     def test_expect_name_is_required_and_keyword_only(self):
         """A default would let a caller silently fall back to unguarded killing."""
         with self.assertRaises(TypeError):
-            server.kill(4321)
+            server.kill(4321, expect_started=1000.5)
         with self.assertRaises(TypeError):
-            server.kill(4321, "llama-server.exe")     # positional not allowed
+            server.kill(4321, "llama-server.exe", expect_started=1000.5)
 
 
 class TestKillPortGuard(unittest.TestCase):
@@ -446,21 +440,22 @@ class TestKillPortGuard(unittest.TestCase):
     def kill(self, owner, expect_port=8080, reported="llama-server.exe"):
         killed = []
         result = server.kill(4321, expect_name="llama-server.exe",
-                             expect_port=expect_port,
+                             expect_started=1000.5, expect_port=expect_port,
                              name_of=lambda pid: reported,
+                             started_of=lambda pid: 1000.5,
                              force=lambda pid: killed.append(pid) or True,
                              owner_of=lambda port: owner)
         return result, killed
 
     def test_proceeds_when_the_pid_still_owns_the_port(self):
-        result, killed = self.kill((4321, "llama-server.exe"))
+        result, killed = self.kill(server.Owner(4321, "llama-server.exe", 1000.5))
         self.assertTrue(result)
         self.assertEqual(killed, [4321])
 
     def test_refuses_a_different_llama_server_on_the_same_pid(self):
         """Name matches, pid matches, but the port is now held by someone else:
         the process we meant to stop is gone and this one is a stranger."""
-        result, killed = self.kill((9999, "llama-server.exe"))
+        result, killed = self.kill(server.Owner(9999, "llama-server.exe", 1000.5))
         self.assertFalse(result)
         self.assertEqual(killed, [], "must not have called the killer at all")
 
@@ -484,16 +479,76 @@ class TestKillPortGuard(unittest.TestCase):
 
         killed = []
         result = server.kill(4321, expect_name="llama-server.exe",
+                             expect_started=1000.5,
                              name_of=lambda pid: "llama-server.exe",
+                             started_of=lambda pid: 1000.5,
                              force=lambda pid: killed.append(pid) or True,
                              owner_of=boom)
         self.assertTrue(result)
         self.assertEqual(killed, [4321])
 
     def test_the_name_check_still_applies_with_a_port(self):
-        result, killed = self.kill((4321, "notepad.exe"), reported="notepad.exe")
+        result, killed = self.kill(server.Owner(4321, "notepad.exe", 1000.5), reported="notepad.exe")
         self.assertFalse(result)
         self.assertEqual(killed, [])
+
+
+class TestKillStartGuard(unittest.TestCase):
+    """The name proves the pid is *a* llama-server, and the port proves it is
+    the one listening there NOW. Neither proves it is the process the user was
+    asked about: that one may have exited, and a new llama-server may hold both
+    its pid and its port. Only the creation time tells those two apart."""
+
+    def kill(self, started_now, expect_started=1000.5, expect_port=None,
+             owner=None):
+        killed = []
+        result = server.kill(4321, expect_name="llama-server",
+                             expect_started=expect_started,
+                             expect_port=expect_port,
+                             name_of=lambda pid: "llama-server",
+                             started_of=lambda pid: started_now,
+                             force=lambda pid: killed.append(pid) or True,
+                             owner_of=lambda port: owner)
+        return result, killed
+
+    def test_proceeds_when_the_start_time_is_unchanged(self):
+        """The positive path, so 'always refuse' cannot pass this class."""
+        result, killed = self.kill(1000.5)
+        self.assertTrue(result)
+        self.assertEqual(killed, [4321])
+
+    def test_refuses_a_recycled_pid_even_under_the_same_name(self):
+        result, killed = self.kill(2000.0)
+        self.assertFalse(result)
+        self.assertEqual(killed, [], "must not have called the stopper at all")
+
+    def test_refuses_same_name_same_port_different_start_time(self):
+        """The case the old guards could not see: every other check passes."""
+        successor = server.Owner(4321, "llama-server", 2000.0)
+        result, killed = self.kill(2000.0, expect_port=8080, owner=successor)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_refuses_when_the_start_time_cannot_be_read(self):
+        result, killed = self.kill(None)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_refuses_when_no_start_time_was_recorded(self):
+        """None == None must not read as 'unchanged'. An owner whose start
+        time could not be read at snapshot time cannot be re-identified, and
+        not knowing is not permission."""
+        result, killed = self.kill(None, expect_started=None)
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
+    def test_expect_started_is_required_and_keyword_only(self):
+        """For the reason expect_name is: a caller that forgets it must not
+        silently get the weaker guard."""
+        with self.assertRaises(TypeError):
+            server.kill(4321, expect_name="llama-server")
+        with self.assertRaises(TypeError):
+            server.kill(4321, "llama-server", 1000.5)
 
 
 class FakeProc:

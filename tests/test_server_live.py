@@ -90,5 +90,50 @@ class TestAFreePort(unittest.TestCase):
         self.assertIsNone(server.port_owner(free_port()))
 
 
+class TestStoppingARealListener(LiveListener):
+    """Each refusal is checked the only way that means anything: the process
+    is still there, still listening, afterwards."""
+
+    def still_listening(self):
+        owner = server.port_owner(self.port)
+        return owner is not None and owner.pid == self.pid
+
+    def test_the_wrong_name_is_refused_and_the_process_survives(self):
+        owner = server.port_owner(self.port)
+        stopped = server.kill(owner.pid, expect_name="not-" + owner.name,
+                              expect_started=owner.started,
+                              expect_port=self.port)
+        self.assertIs(stopped, False)
+        self.assertTrue(self.still_listening())
+
+    def test_the_wrong_start_time_is_refused_and_the_process_survives(self):
+        owner = server.port_owner(self.port)
+        stopped = server.kill(owner.pid, expect_name=owner.name,
+                              expect_started=owner.started + 60,
+                              expect_port=self.port)
+        self.assertIs(stopped, False)
+        self.assertTrue(self.still_listening())
+
+    def test_the_wrong_port_is_refused_and_the_process_survives(self):
+        owner = server.port_owner(self.port)
+        stopped = server.kill(owner.pid, expect_name=owner.name,
+                              expect_started=owner.started,
+                              expect_port=free_port())
+        self.assertIs(stopped, False)
+        self.assertTrue(self.still_listening())
+
+    def test_the_right_identity_stops_it_and_frees_the_port(self):
+        owner = server.port_owner(self.port)
+        stopped = server.kill(owner.pid, expect_name=owner.name,
+                              expect_started=owner.started,
+                              expect_port=self.port)
+        self.assertIs(stopped, True)
+        deadline = time.monotonic() + 10
+        while (server.port_owner(self.port) is not None
+               and time.monotonic() < deadline):
+            time.sleep(0.1)
+        self.assertIsNone(server.port_owner(self.port))
+
+
 if __name__ == "__main__":
     unittest.main()
