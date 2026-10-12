@@ -6,6 +6,8 @@ its allowed values change, update CACHE_TYPES / SPEC_TYPES below.
 import copy
 import json
 import math
+import os
+import shlex
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -170,7 +172,7 @@ def catalog_defaults():
     return {s.key: copy.deepcopy(s.default) for g in GROUPS for s in g.settings}
 
 
-def split_extra(text):
+def split_extra_windows(text):
     """Split the extra-args row using WINDOWS rules, not POSIX.
 
     shlex.split is POSIX: it treats backslash as an escape, so
@@ -210,6 +212,37 @@ def split_extra(text):
     if started or cur:
         args.append("".join(cur))
     return True, args
+
+
+def split_extra_posix(text):
+    """Split the extra-args row by POSIX shell rules: a backslash escapes, and
+    both ' and " group.
+
+    The mirror image of split_extra_windows, and right for the same reason on
+    the other side. This row exists for path-bearing flags, and on Linux and
+    macOS a user writes those the way their shell reads them - `my\\ models`
+    or 'my models'. Windows rules there would hand llama-server the backslash
+    and the quote characters themselves.
+
+    shlex raises on input it cannot finish. That is reported, not raised,
+    because this text can come from a hand-edited config file.
+
+    Returns (True, [args]) or (False, error)."""
+    try:
+        return True, shlex.split(text)
+    except ValueError as exc:
+        return False, f"unbalanced quote or trailing backslash - {exc}"
+
+
+def split_extra(text, windows=None):
+    """Split the extra-args row by the rules of the machine this runs on.
+
+    A config's extra-args string carries machine paths and was never portable,
+    so it is read the way that machine's shell would read it. `windows` is
+    injectable so both sets of rules are testable on either kind of machine."""
+    if windows is None:
+        windows = os.name == "nt"
+    return split_extra_windows(text) if windows else split_extra_posix(text)
 
 
 def _range_error(setting, value):

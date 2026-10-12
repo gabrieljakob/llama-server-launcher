@@ -1,4 +1,5 @@
 import os
+import shlex
 import unittest
 
 from llama_launcher import board, catalog
@@ -582,6 +583,37 @@ class TestAsPowerShell(unittest.TestCase):
         """A hand-edited alias can be a number. [c] is a display path, and the
         board's rule is that a wrong-typed value still reaches the screen."""
         self.assertIn("5", board.as_powershell(["a.exe", "--alias", 5]))
+
+
+class TestAsCommand(unittest.TestCase):
+    """[c] prints a line for the shell this machine's user works in."""
+
+    ARGV = ["/opt/llama/llama-server", "--model", "/models/my model.gguf",
+            "--chat-template-kwargs", '{"a":"b c"}', "--alias", "it's $HOME|x"]
+
+    def test_windows_gets_the_powershell_form(self):
+        self.assertEqual(board.as_command(self.ARGV, windows=True),
+                         board.as_powershell(self.ARGV))
+
+    def test_elsewhere_a_posix_shell_reads_it_back_exactly(self):
+        """The property that matters: what the shell would hand the binary is
+        what the launch itself passes - spaces, quotes, $ and | included."""
+        line = board.as_command(self.ARGV, windows=False)
+        self.assertEqual(shlex.split(line), self.ARGV)
+
+    def test_the_posix_form_is_not_the_powershell_form(self):
+        line = board.as_command(self.ARGV, windows=False)
+        self.assertFalse(line.startswith("& "))
+        self.assertNotIn("--%", line)
+
+    def test_a_non_string_in_argv_does_not_raise(self):
+        """A hand-edited alias can be a number, and [c] is a display path."""
+        line = board.as_command(["llama-server", "--alias", 5], windows=False)
+        self.assertIn("5", line)
+
+    def test_the_default_follows_the_machine(self):
+        self.assertEqual(board.as_command(self.ARGV),
+                         board.as_command(self.ARGV, windows=os.name == "nt"))
 
 
 @unittest.skipUnless(os.path.exists(LLAMA_SERVER) and os.path.exists(

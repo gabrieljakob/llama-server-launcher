@@ -464,7 +464,7 @@ def run_board(data, cfg):
                      if values.get("draft_model") else None)
             argv = [data["llama_server"]] + catalog.build_argv(
                 values, model_path, alias_of(cfg), draft)
-            print("\n" + board.as_powershell(argv) + "\n")
+            print("\n" + board.as_command(argv) + "\n")
             continue
         if action == "save":
             # Settings this launcher has no catalog entry for are the user's

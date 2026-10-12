@@ -1,3 +1,4 @@
+import os
 import unittest
 from llama_launcher import catalog
 
@@ -119,12 +120,12 @@ class TestParseValue(unittest.TestCase):
     def test_extra_args_keep_windows_backslashes(self):
         """POSIX shlex ate them: a --lora path became 'D:LLM' plus
         'Modelsadaptersx.gguf', silently, on the way to a real server."""
-        ok, args = catalog.split_extra('--lora "D:\\LLM Models\\adapters\\x.gguf"')
+        ok, args = catalog.split_extra_windows('--lora "D:\\LLM Models\\adapters\\x.gguf"')
         self.assertTrue(ok)
         self.assertEqual(args, ["--lora", "D:\\LLM Models\\adapters\\x.gguf"])
 
     def test_extra_args_split_unquoted_input_on_spaces_only(self):
-        ok, args = catalog.split_extra("--chat-template-file D:\\t\\qwen.jinja")
+        ok, args = catalog.split_extra_windows("--chat-template-file D:\\t\\qwen.jinja")
         self.assertTrue(ok)
         self.assertEqual(args, ["--chat-template-file", "D:\\t\\qwen.jinja"])
 
@@ -908,6 +909,52 @@ class TestSpecErrorIsTotal(unittest.TestCase):
 
     def test_an_empty_values_dict_is_survivable(self):
         self.assertIsNone(catalog.spec_error({}))
+
+
+class TestSplitExtraPosix(unittest.TestCase):
+    """The extra-args row on Linux and macOS, read the way a shell reads it."""
+
+    def test_double_quotes_group_a_path_with_spaces(self):
+        self.assertEqual(
+            catalog.split_extra_posix('--lora "/models/my adapters/x.gguf"'),
+            (True, ["--lora", "/models/my adapters/x.gguf"]))
+
+    def test_single_quotes_group_too(self):
+        self.assertEqual(catalog.split_extra_posix("--alias 'my model'"),
+                         (True, ["--alias", "my model"]))
+
+    def test_a_backslash_escapes_a_space(self):
+        self.assertEqual(
+            catalog.split_extra_posix("--lora /models/my\\ adapters/x.gguf"),
+            (True, ["--lora", "/models/my adapters/x.gguf"]))
+
+    def test_an_unbalanced_quote_is_reported_not_raised(self):
+        ok, err = catalog.split_extra_posix('--api-key "sk-abc')
+        self.assertFalse(ok)
+        self.assertIn("unbalanced", err)
+
+    def test_empty_text_is_no_arguments(self):
+        self.assertEqual(catalog.split_extra_posix(""), (True, []))
+
+
+class TestSplitExtraDispatch(unittest.TestCase):
+    """One string, two readings: a backslash is an ordinary character on
+    Windows and an escape everywhere else."""
+
+    TEXT = "--lora D:\\x\\y.gguf"
+
+    def test_windows_rules_keep_the_backslashes(self):
+        self.assertEqual(catalog.split_extra(self.TEXT, windows=True),
+                         (True, ["--lora", "D:\\x\\y.gguf"]))
+
+    def test_posix_rules_treat_them_as_escapes(self):
+        self.assertEqual(catalog.split_extra(self.TEXT, windows=False),
+                         (True, ["--lora", "D:xy.gguf"]))
+
+    def test_the_default_follows_the_machine(self):
+        native = (catalog.split_extra_windows if os.name == "nt"
+                  else catalog.split_extra_posix)
+        self.assertEqual(catalog.split_extra(self.TEXT), native(self.TEXT))
 
 
 if __name__ == "__main__":

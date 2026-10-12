@@ -1,6 +1,7 @@
 """Terminal UI: the config menu and the settings board."""
 import json
 import os
+import shlex
 
 from . import catalog
 
@@ -356,6 +357,23 @@ def as_powershell(argv):
         return "& " + head + (" " + rest if rest else "")
     rest = " ".join(_crt_argument(a, ps_safe=True) for a in argv[1:])
     return "& " + head + (" --% " + rest if rest else "")
+
+
+def as_command(argv, windows=None):
+    """argv -> a command line for the shell this machine's user works in.
+
+    PowerShell on Windows, where as_powershell does the real work. A POSIX
+    shell everywhere else, where shlex.join is the whole job: one quoting
+    scheme, and no second parser downstream to satisfy. str(), because a
+    hand-edited alias can be a number and [c] is a display path - the board's
+    rule is that a wrong-typed value still reaches the screen.
+
+    `windows` is injectable so both forms are testable on either machine."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return as_powershell(argv)
+    return shlex.join(str(arg) for arg in argv)
 
 
 def dispatch(key):

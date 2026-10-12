@@ -369,6 +369,15 @@ class TestShowCommandIsValidated(unittest.TestCase):
         self.assertIn("--model", text)
         self.assertIn("--alias", text)
 
+    def test_c_prints_whatever_as_command_makes_of_the_argv(self):
+        """[c] goes through the per-machine dispatcher, not straight to the
+        PowerShell renderer."""
+        cfg = {"name": "c", "alias": "c", "model": "m.gguf", "settings": {}}
+        with mock.patch.object(main.board, "as_command",
+                               lambda argv: "FROM-AS-COMMAND"):
+            text = self.board(cfg, ["c", "q"])
+        self.assertIn("FROM-AS-COMMAND", text)
+
 
 class LaunchFixture(unittest.TestCase):
     """launch() up to, but never through, the point where a process starts."""
