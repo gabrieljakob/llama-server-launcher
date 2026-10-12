@@ -3592,3 +3592,51 @@ Each is small; each is listed so a reviewer does not have to find it.
 | §3: hatchling needs "no include configuration" | `packages = ["llama_launcher"]` is stated explicitly | Makes it impossible for `tests/` to reach the wheel |
 | §7 step 1: install uv "with Astral's official installer" | On Windows it is saved to a temp file and run in a child PowerShell | Astral's script calls `exit` on failure, which under `irm \| iex` would close the user's window |
 | §8 lists the live tests | Two more are added: a real child's output reaches the log, and it runs in its own session | The unit tests inject `Popen`; these show the real one accepts the arguments |
+
+## What changed while this plan was executed
+
+The plan above is kept as it was written. It was executed on 2026-10-12 by an orchestrator and Sonnet subagents, one implementer and one reviewer per task, then a whole-branch review and one fix wave. Where the result differs from the text above, this section says how and why.
+
+### The code differs from the plan's listings in these places
+
+| Where | The plan said | What was built | Why |
+|---|---|---|---|
+| Task 2, `TestConfigThatCannotBeRead` | Patch `CONFIG_PATH` with itself; leave `ADOPT_PATH` alone | Both are patched into a scratch folder | The test ran the real `main()` with real paths. Under the plan's own mutation 2 it copied the owner's `launcher_configs.json` into `%APPDATA%\llama-launcher\`. The copy was verified byte-identical and removed; the test can no longer reach a real path |
+| Task 7, `install.sh` | `fetch … \| sh` for Astral's installer | The installer is saved to a temp file, the download is checked, then it is run | A dropped connection had the part that arrived executed, and the script then blamed `PATH`. That contradicts §7 of the spec |
+| Task 4 / spec §5.2, `launch` | An unidentifiable listener is `UNKNOWN_OWNER`, and `launch` says "could not check … starting anyway" | When the owner is unknown, `launch` probes `127.0.0.1` and the configured host and refuses if either answers | The port was known to be taken. llama-server died on the bind while the readiness check reported the stranger's listener as ours |
+| Task 4, `server.kill` | Refuses `"unknown"` because it differs from the expected name | Refuses `"unknown"` unconditionally | The expected name now comes from the user's config |
+| Task 2, `run_board` | `saved to launcher_configs.json` | `saved to <full path>` | Same reason the first-run messages changed |
+| Task 7, both installers | Print `installed: $(… --version)` | Read the version first and fail if the launcher does not run | A failing `--version` was reported as a successful install |
+| Task 7, `install.ps1` header | Only `PATH` outlives the script | Names TLS 1.2 as well | The comment was untrue |
+| Task 8, `ci.yml` | No job timeout | `timeout-minutes: 20` on both jobs | A hung live test would hold a runner for hours |
+| Task 9, README | "the server gets five seconds to shut down before it is forced" | Says that for Linux and macOS, and that Windows ends it at once | The claim was false on Windows |
+| Tasks 3-4, `tests/test_server.py` | — | Two docstrings and one test name no longer mention `netstat`/`tasklist` | Stale after the rewrite |
+
+### Four of the plan's own checks were wrong
+
+The code was right each time; the check was not.
+
+- **Task 4, Step 9.** The `grep` expected no `taskkill` in `server.py`, but the plan's own `_stop` docstring names it. Corrected in the text above before execution.
+- **Task 4, mutation row 5.** `"llama-server.exe"` is not a substring of `"llama-server-proxy.exe"`, so the launch-level test named there does not fail. The mutation is caught by `TestIsLlamaServer.test_a_longer_or_shorter_name_does_not_match`.
+- **Task 7, Step 4.** The carriage-return count matched the letter `r`. `tr -cd '\r' < install.sh | wc -c` is the working check; it prints `0`.
+- **Task 9, Step 8.** The pattern `377` matches the badge colour `3776AB`. With `\b377\b` it finds nothing.
+
+### How it was run
+
+- On a branch in the main checkout, not a worktree, because every command in this plan is written for that path.
+- Every subagent, including the final reviewer, ran on Sonnet, at the owner's request.
+- Task reviews and the final review diffed from the commit after the one that added the spec and this plan, so the reviewers read code rather than 4,000 lines of prose.
+- No timeout was added inside the live tests. On a Windows virtual environment the listening process is a child of the one `Popen` returns, so killing the `Popen` handle would not unblock the read. The CI timeout bounds it instead.
+- Task 10 Step 3, the manual pass against the real `llama-server.exe`, was not run. It is the owner's, before merging.
+
+### Left for later
+
+The reviews raised 30 minor points. Four were fixed in the final wave. The whole-branch review judged the rest safe to merge with. They are worth a pass before more features land:
+
+- **Installers.** A network error is reported as "no published release". The release tag read from GitHub's redirect is not whitelisted. There is no `--` before the source argument. A temp file can be left behind on Ctrl-C, or when neither `curl` nor `wget` exists. BusyBox `wget` lacks the flags used. `install.ps1` creates its temp file before the `try`. The Windows "installed but does not run" path was checked by reading only.
+- **CI.** If a runner image ships `uv`, the install job stops exercising the bootstrap branch without saying so. The tool path `~/.local/bin` is hard-coded. Actions are pinned to tags, not commit hashes. A pull-request branch runs everything twice. The scripts' release lookup is not covered.
+- **`server.py`.** `port_owner` can return an owner with no start time if the process exits between two reads (`kill` refuses it). With two processes listed for one port, the first one exiting reads as "free". `_stop` does not re-check the start time on the process object it opens.
+- **`__main__.py`.** `--config ""` falls through to the default path. `is_llama_server` never matches a config path written without `.exe` on Windows (startup already refuses a path that does not exist). With `--config`, a clone's `model_profiles.json` is still consulted for migration.
+- **Tests.** Temp folders from `mkdtemp()` are not removed. The live tests read their child's first line with no timeout. Nothing pins that the "log could not be opened" line is absent on Windows. `split_extra_posix`'s trailing-backslash branch is untested. The two "default follows the machine" tests recompute the expression they test. The launch-level "merely contains" test cannot fail under one substring mutation.
+- **README.** The one-liners fail with "no published release" until `v0.1.0` exists. Requirements does not mention `curl` or `wget`. The log folders honour `$XDG_STATE_HOME`, which is not stated.
+- **Packaging.** `launch_model.bat` does not pass on `uv run`'s exit code.
