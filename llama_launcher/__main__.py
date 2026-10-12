@@ -1,10 +1,14 @@
 """Entry point. Wiring only - the logic lives in the other four modules."""
+import argparse
 import glob
+import importlib.metadata
 import os
 import socket
 import shutil
 import subprocess
 import sys
+
+import platformdirs
 
 from . import board, catalog, config, server
 
@@ -18,9 +22,19 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, OSError):
         pass                      # already-wrapped or redirected stream: ignore
 
+APP = "llama-launcher"
+CONFIG_NAME = "launcher_configs.json"
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
-CONFIG_PATH = os.path.join(SCRIPTS, "launcher_configs.json")
+# Per-user, in the folder each OS keeps application config in - NOT beside the
+# code. Installed as a tool, "beside the code" is a site-packages folder that
+# the next reinstall replaces, taking every saved config with it.
+CONFIG_PATH = os.path.join(
+    platformdirs.user_config_dir(APP, appauthor=False, roaming=True), CONFIG_NAME)
+# Where the config lived before 0.1.0: beside the package. That only means
+# anything in a clone, and adopt_existing_config() copies it across once.
+ADOPT_PATH = os.path.join(SCRIPTS, CONFIG_NAME)
 LEGACY_PATH = os.path.join(SCRIPTS, "model_profiles.json")
 
 SERVER_EXE = "llama-server.exe" if sys.platform == "win32" else "llama-server"
@@ -149,7 +163,7 @@ def first_run_setup(legacy=None):
     alternative - constants in the source - is what made this launcher only work
     on the machine it was written on."""
     print("Setting up. Two paths are needed; both are stored in")
-    print(f"{os.path.basename(CONFIG_PATH)} and can be edited there later.\n")
+    print(f"{CONFIG_PATH}\nand can be edited there later.\n")
     exe = ask_path("llama-server executable", find_llama_server(), must_be_dir=False)
     root = ask_path("folder containing your .gguf models",
                     guess_model_root(legacy) if legacy else None, must_be_dir=True)
@@ -502,7 +516,67 @@ def new_config(data):
             "model": config.relativise(chosen, data["model_root"]), "settings": {}}
 
 
-def main():
+def version():
+    """The installed version, or a marker when run from a tree that was never
+    installed (no metadata to read)."""
+    try:
+        return importlib.metadata.version(APP)
+    except importlib.metadata.PackageNotFoundError:
+        return "0+unknown"
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="An interactive board for llama.cpp's llama-server.")
+    parser.add_argument("--version", action="version",
+                        version=f"{APP} {version()}")
+    # argparse runs help text through %-formatting, and a path may hold a %.
+    shown = CONFIG_PATH.replace("%", "%%")
+    parser.add_argument("--config", metavar="PATH",
+                        help=f"use this config file instead of {shown}")
+    return parser.parse_args(argv)
+
+
+def adopt_existing_config(source, target):
+    """Copy a config left beside the package into the per-user folder.
+
+    Before 0.1.0 the config was written next to the code, so anyone who ran the
+    launcher from a clone has one there. Copied once, never over a file that is
+    already in the per-user folder, and the original is left alone: it is the
+    user's only copy until this succeeds, and their rollback after.
+
+    Returns True only if a copy was made. Reports a failed copy instead of
+    raising - this runs before anything else, and the fallback (first-run
+    setup) is a working launcher rather than a traceback."""
+    if os.path.exists(target) or not os.path.isfile(source):
+        return False
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(source, target)
+    except OSError as exc:
+        print(f"  could not copy {source} to {target}: {exc}")
+        return False
+    print(f"  copied your existing config to {target}")
+    print(f"  ({source} is left in place and is no longer read)\n")
+    return True
+
+
+def main(argv=None):
+    global CONFIG_PATH
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.config:
+        # Exactly the file that was asked for: no adoption, no second guess.
+        CONFIG_PATH = os.path.abspath(os.path.expanduser(args.config))
+    else:
+        adopt_existing_config(ADOPT_PATH, CONFIG_PATH)
+    try:
+        # config.save writes its scratch file beside the target, so the folder
+        # has to exist before the first save. A failure here is not reported:
+        # the save that needs the folder reports it, and names the path.
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    except OSError:
+        pass
     try:
         return _main()
     except Abort:
@@ -528,7 +602,7 @@ def first_run_fresh(model_root, llama_server):
         print(f"  {exc}")
         return False
     found = len(scan_models(model_root))
-    print(f"  wrote {os.path.basename(CONFIG_PATH)}; found {found} model file(s).")
+    print(f"  wrote {CONFIG_PATH}; found {found} model file(s).")
     print("  Press [n] to build your first config.\n")
     return True
 
