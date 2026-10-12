@@ -57,7 +57,20 @@ main() {
 
     if ! have uv; then
         say "uv not found - installing it with Astral's installer"
-        fetch https://astral.sh/uv/install.sh | sh
+        # Saved whole before it is run. Piped straight into sh, a connection
+        # that dropped part-way would have the part that arrived executed.
+        installer=$(mktemp) || fail "could not create a temporary file"
+        if fetch https://astral.sh/uv/install.sh >"$installer"; then
+            if sh "$installer"; then
+                rm -f "$installer"
+            else
+                rm -f "$installer"
+                fail "uv's installer failed"
+            fi
+        else
+            rm -f "$installer"
+            fail "could not download uv's installer from https://astral.sh/uv/install.sh"
+        fi
         PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"
         export PATH
         have uv || fail "uv was installed but is not on PATH yet; open a new terminal and run this again"
