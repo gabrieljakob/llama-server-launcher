@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.12", "3.14"]
+    env:
+      # uv reads this itself, so the matrix does not depend on an action input.
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Install
+        run: uv sync --locked
+      - name: Test
+        run: uv run python -m unittest discover -s tests -t . -v
+
+  install:
+    # No uv is installed first: each script has to bring it, as it does for a
+    # user who has nothing.
+    name: install script (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    env:
+      LLAMA_LAUNCHER_SOURCE: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install.sh
+        if: runner.os != 'Windows'
+        run: |
+          sh install.sh
+          expected="llama-launcher $(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)"
+          actual="$("$HOME/.local/bin/llama-launcher" --version)"
+          echo "expected: $expected"
+          echo "actual:   $actual"
+          test "$actual" = "$expected"
+      - name: install.ps1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Get-Content -Raw .\install.ps1 | Invoke-Expression
+          $version = (Select-String -Path pyproject.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $expected = "llama-launcher $version"
+          $actual = & "$HOME\.local\bin\llama-launcher.exe" --version
+          Write-Host "expected: $expected"
+          Write-Host "actual:   $actual"
+          if ($actual -ne $expected) { throw "version mismatch" }
