@@ -188,12 +188,19 @@ class TestMainFlags(unittest.TestCase):
 class TestConfigThatCannotBeRead(unittest.TestCase):
     def test_config_pointing_at_a_folder_is_reported_not_raised(self):
         folder = tempfile.mkdtemp()
+        scratch = tempfile.mkdtemp()
 
         def no_ask(prompt=""):
             raise AssertionError("the menu must not be reached")
 
         out = io.StringIO()
-        with mock.patch.object(main, "CONFIG_PATH", main.CONFIG_PATH), \
+        # Both paths point into a scratch folder. --config replaces CONFIG_PATH
+        # anyway, but this test runs the real main(), and a regression there
+        # must not be able to reach the user's real config or the clone's.
+        with mock.patch.object(main, "CONFIG_PATH",
+                               os.path.join(scratch, "user", "launcher_configs.json")), \
+             mock.patch.object(main, "ADOPT_PATH",
+                               os.path.join(scratch, "clone", "launcher_configs.json")), \
              mock.patch.object(main, "ask", no_ask), \
              contextlib.redirect_stdout(out):
             code = main.main(["--config", folder])
