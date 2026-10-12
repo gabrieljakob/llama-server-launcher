@@ -1,0 +1,2 @@
+# A CRLF shell script does not run. Keep this one LF on every checkout.
+install.sh text eol=lf
