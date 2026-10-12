@@ -5,10 +5,9 @@
 **An interactive board for [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`.**
 Pick a named configuration, adjust any setting on a numbered board, press <kbd>Enter</kbd> to launch.
 
+[![CI](https://github.com/gabrieljakob/llama-server-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/gabrieljakob/llama-server-launcher/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Dependencies](https://img.shields.io/badge/dependencies-none-success)](#requirements)
-[![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen)](#tests)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)](#porting)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555)](#requirements)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#licence)
 
 </div>
@@ -56,49 +55,96 @@ Model: Qwen3.8-27B-UD-Q3_K_XL.gguf   |  CUDA0: NVIDIA GeForce RTX 4080 (16375 Mi
 - [Highlights](#highlights) · [Requirements](#requirements) · [Quick start](#quick-start)
 - [The board](#the-board) · [Configuration](#configuration) · [Reasoning](#reasoning) · [Speculative decoding](#speculative-decoding)
 - [Launching](#launching) · [Tests](#tests) · [Layout](#layout)
-- [Porting](#porting) · [Windows and locale notes](#windows-and-locale-notes)
+- [Windows and locale notes](#windows-and-locale-notes)
 
 ## Highlights
 
 | | |
 |---|---|
-| **Zero install** | Python 3.12 standard library only. No venv, no `pip`, no lockfile. |
+| **One-line install** | One command on Windows, Linux or macOS. It brings its own Python, so you need neither Python nor git first. |
 | **One model, many configs** | Configs are named command lines, not models. The same weights can appear five times with different flags. |
 | **Backend-agnostic** | Asks the binary what devices it has instead of assuming a vendor — CUDA, ROCm, Vulkan, Metal or plain CPU. |
-| **Nothing hardcoded** | Two paths, asked once on first run, editable in JSON forever after. |
+| **Nothing hardcoded** | Two paths, asked once on first run, kept in your per-user config folder and editable in JSON forever after. |
 | **Unset means unset** | A setting shown as `-` is not passed at all, so `llama-server`'s own default applies. |
 | **Speculative decoding, gated** | The `--spec-type` families need different arguments — one requires a draft model, one merely accepts it, one ignores it. The board adapts and validates before launching. |
-| **Safe port takeover** | Offers to stop what owns the port *only* if it is a llama-server, re-verifying identity immediately before the kill. |
+| **Safe port takeover** | Offers to stop what owns the port *only* if it is your llama-server, and re-checks its name, its start time and the port at the moment it stops it. |
 | **Real readiness** | Polls until the port actually accepts a connection. It does not claim the server started until something answers. |
 
 ## Requirements
 
-- **Python 3.12+** — standard library only, nothing to install
+- Windows, Linux or macOS
 - Any `llama-server` build and some `.gguf` files
+
+The installer brings [uv](https://docs.astral.sh/uv/), and uv brings Python 3.12+ and the two
+libraries the launcher uses, [psutil](https://github.com/giampaolo/psutil) and
+[platformdirs](https://github.com/tox-dev/platformdirs). psutil ships prebuilt for x86-64 and
+arm64 on all three systems; on anything else uv needs a C compiler to build it.
 
 Works with whatever backend your llama.cpp was built against. The launcher asks the binary what
 devices it has rather than assuming a vendor, so an AMD card with a Vulkan build reports Vulkan,
 and a CPU-only build says so.
 
-> [!NOTE]
-> **Currently Windows-only**, because the port/process layer shells out to `netstat`, `tasklist`
-> and `taskkill`. Everything else is portable — see [Porting](#porting).
-
 ## Quick start
+
+**Windows**, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/gabrieljakob/llama-server-launcher/main/install.ps1 | iex
+```
+
+**Linux and macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gabrieljakob/llama-server-launcher/main/install.sh | sh
+```
+
+Then:
+
+```bash
+llama-launcher
+```
+
+The installer needs no administrator rights. It installs uv if you do not have it, then installs
+the latest release as a uv tool. Run the same line again to update, and
+`uv tool uninstall llama-launcher` to remove it. Your config is not touched by any of the three.
+
+<details>
+<summary><b>Rather read the script before you run it?</b></summary>
+
+<br>
+
+Both are short. Download, read, then run:
+
+```powershell
+irm https://raw.githubusercontent.com/gabrieljakob/llama-server-launcher/main/install.ps1 -OutFile install.ps1
+notepad install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gabrieljakob/llama-server-launcher/main/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+</details>
+
+From a clone instead:
 
 ```bash
 git clone https://github.com/gabrieljakob/llama-server-launcher.git
 cd llama-server-launcher
-python -m llama_launcher
+uv run llama-launcher
 ```
 
-Or double-click `launch_model.bat`.
+On Windows you can also double-click `launch_model.bat` in the clone.
 
-On first run it asks for two paths and stores them in `launcher_configs.json`:
+On first run it asks for two paths and stores them in your config file:
 
 ```
 Setting up. Two paths are needed; both are stored in
-launcher_configs.json and can be edited there later.
+C:\Users\you\AppData\Roaming\llama-launcher\launcher_configs.json
+and can be edited there later.
 
   llama-server executable [C:\llama.cpp\llama-server.exe]:
   folder containing your .gguf models: D:\models
@@ -116,7 +162,7 @@ Then press <kbd>n</kbd> to build a config from any `.gguf` it finds.
 |:---:|---|
 | <kbd>1</kbd>–<kbd>12</kbd> | Edit that row. Blank keeps the current value; `-` clears a setting back to llama-server's own default |
 | <kbd>s</kbd> | Save — writes only the values that differ from the defaults, so the `defaults` block stays live |
-| <kbd>c</kbd> | Print the equivalent command line, quoted so it can be pasted into PowerShell |
+| <kbd>c</kbd> | Print the equivalent command line, quoted for the shell you are in — PowerShell on Windows, a POSIX shell on Linux and macOS |
 | <kbd>Enter</kbd> | Launch |
 | <kbd>q</kbd> | Back |
 
@@ -134,7 +180,19 @@ catalog, editable and working, while the board never mentioned it existed.
 
 ## Configuration
 
-Everything lives in `launcher_configs.json`:
+Everything lives in one file, `launcher_configs.json`, in your per-user config folder:
+
+| OS | Folder |
+|---|---|
+| Windows | `%APPDATA%\llama-launcher\` |
+| Linux | `~/.config/llama-launcher/` (or `$XDG_CONFIG_HOME/llama-launcher/`) |
+| macOS | `~/Library/Application Support/llama-launcher/` |
+
+`llama-launcher --config PATH` uses a different file. If you ran the launcher from a clone before
+0.1.0, the `launcher_configs.json` beside the code is copied to that folder the first time you
+start it, and the original is left where it was.
+
+It looks like this:
 
 ```json
 {
@@ -225,24 +283,36 @@ config, not a launchable thing.
 
 ## Launching
 
-The launcher checks what owns the target port and offers to stop it **only if it is a
-llama-server**, re-verifying the process identity immediately before killing — a port snapshot can
-be minutes old by the time you answer, and Windows recycles PIDs. Servers on other ports are left
-alone, so `:8080` and `:8082` coexist.
+The launcher checks what owns the target port and offers to stop it **only if it is your
+llama-server** — the process name has to equal the file name of the binary in your config, not
+merely contain it. Before it stops anything it re-checks three things: the name, the port, and the
+moment the process was started. A port snapshot can be minutes old by the time you answer, and
+operating systems recycle PIDs; a different process that inherited the PID has a different start
+time and is left alone. Servers on other ports are never touched, so `:8080` and `:8082` coexist.
 
-After spawning, it polls until the port actually accepts a connection, watching for the child
-exiting, and reports one of three outcomes: the URL, the exit code, or a timeout.
+Stopping asks first: the server gets five seconds to shut down before it is forced.
+
+On Windows the server starts in its own console window. On Linux and macOS it starts detached,
+with its output in a log file whose path is printed — under `~/.local/state/llama-launcher/log/`
+on Linux and `~/Library/Logs/llama-launcher/` on macOS. There is one file per config and port,
+overwritten at each launch.
+
+After spawning, the launcher polls until the port actually accepts a connection, watching for the
+child exiting, and reports one of three outcomes: the URL, the exit code, or a timeout.
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -t . -v
+uv run python -m unittest discover -s tests -t . -v
 ```
 
-**377 tests, standard library only.**
+Every push runs them on Windows, Linux and macOS, on Python 3.12 and 3.14, together with both
+install scripts. Most of the process layer is tested against a fake; `tests/test_server_live.py`
+then starts a real process on each OS and finds it, refuses to stop it under the wrong identity,
+and stops it under the right one.
 
 <details>
-<summary><b>Why the count is not the point</b></summary>
+<summary><b>How these tests earned their place</b></summary>
 
 <br>
 
@@ -261,14 +331,16 @@ failed when I took their behaviour away.
 ## Layout
 
 ```
-launcher/
+install.ps1     Windows bootstrap
+install.sh      Linux and macOS bootstrap
+llama_launcher/
   catalog.py    setting definitions, validation, argv emission, speculative gating
   config.py     load/save, four-layer resolution, migration, atomic writes
-  server.py     port ownership, targeted kill, spawn, readiness polling
-  board.py      config menu, settings board, row editors, PowerShell quoting
+  server.py     port ownership, guarded stop, spawn, readiness polling
+  board.py      config menu, settings board, row editors, shell quoting
   __main__.py   entry point; wiring only
-tests/          377 tests
-docs/           design spec and implementation plan
+tests/
+docs/           design specs and implementation plans
 ```
 
 `catalog` and `config` are pure. `server` is the only module that touches processes.
@@ -276,42 +348,23 @@ docs/           design spec and implementation plan
 Adding a new llama-server flag is **one record in `catalog.py`**. The consumers iterate the
 catalog generically, and I know that holds because I added one and nothing else needed touching.
 
-## Porting
-
-The only OS-specific module is `server.py`, which finds what owns a TCP port and stops it. It
-shells out to `netstat -ano`, `tasklist` and `taskkill`. A POSIX port means replacing those three
-with `ss`/`lsof`, `ps` and `signal`, keeping the same four functions — the rest of the codebase
-never touches a process. `spawn()` also asks for a new console window, which is a Windows flag
-guarded by `sys.platform`.
-
-Nothing else assumes an OS: paths go through `os.path`, the executable name already varies by
-platform, and device detection asks the binary.
-
 ## Windows and locale notes
 
 <details>
-<summary><b>Five things I learned the hard way on a non-English Windows</b></summary>
+<summary><b>Three things I learned the hard way on a non-English Windows</b></summary>
 
 <br>
-
-- `netstat` and `tasklist` print **localised** output. Listening sockets are identified by row
-  *shape* (a wildcard remote address), never by matching `LISTENING`, which reads `ABHÖREN` on a
-  German install.
-
-- `tasklist`'s "no such process" line is localised **and** exits 0, so only the absent CSV row
-  distinguishes it. Its text also contains bytes that are undefined in cp1252, which crashed
-  `subprocess` decoding in a reader thread where no `try` could see it — both console tools are
-  read with the OEM codepage.
 
 - Console output is cp1252. Strings the launcher authors are ASCII; model names and paths are user
   data and pass through verbatim, with stdout widened to UTF-8 rather than mangling a filename.
 
-- The extra-args row splits by **Windows** rules, not POSIX — `shlex.split` treats backslash as an
-  escape and quietly turns `D:\LLM Models\x.gguf` into two mangled fragments.
+- On Windows the extra-args row splits by **Windows** rules, not POSIX — `shlex.split` treats
+  backslash as an escape and quietly turns `D:\LLM Models\x.gguf` into two mangled fragments. On
+  Linux and macOS it uses POSIX rules, because there that is what you would type in a shell.
 
-- `[c]` quotes for PowerShell, which needs different escaping from `cmd.exe` for the same argument.
-  Launching is unaffected either way: arguments are passed as a list and never built into a command
-  string.
+- On Windows `[c]` quotes for PowerShell, which needs different escaping from `cmd.exe` for the
+  same argument. Launching is unaffected either way: arguments are passed as a list and never
+  built into a command string.
 
 </details>
 
