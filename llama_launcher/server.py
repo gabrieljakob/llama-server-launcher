@@ -1,5 +1,7 @@
 """Process and port handling. The only module that touches running processes."""
 import collections
+import os
+import re
 import socket
 import subprocess
 import sys
@@ -248,7 +250,8 @@ def port_open(host, port, timeout=0.5):
 
 
 def wait_ready(host, port, proc, timeout=300, tick=None,
-               probe=port_open, sleep=time.sleep, clock=time.monotonic):
+               probe=port_open, sleep=time.sleep, clock=time.monotonic,
+               where="check its console window"):
     """Poll until the port accepts a connection. Condition-based, not a fixed
     sleep: a 20 GB model takes far longer to load than a 1 GB one.
 
@@ -262,18 +265,21 @@ def wait_ready(host, port, proc, timeout=300, tick=None,
     listener as our success and sent the user to someone else's server. Asking
     "is the child alive?" first means a dead child is always reported as dead.
     A window remains while the child is alive but doomed; closing it fully would
-    mean matching the listener's pid to proc.pid on every probe."""
+    mean matching the listener's pid to proc.pid on every probe.
+
+    `where` finishes the "it died" message with the place its output went: its
+    console window, or the log file it was started with."""
     if proc is None:
         # spawn() returns None when llama-server could not be started at all.
         # Without this, the poll below would probe a port nothing of ours is
         # ever going to open - and report a stranger's listener as success.
         return False, ("llama-server did not start - check that the "
-                       "llama-server.exe path is still correct")
+                       "llama-server path is still correct")
     start = clock()
     while True:
         if proc.poll() is not None:
             return False, (f"llama-server exited with code {proc.returncode} "
-                           f"before the port opened - check its console window")
+                           f"before the port opened - {where}")
         if probe(host, port):
             return True, f"http://{host}:{port}"
         if clock() - start > timeout:
@@ -283,20 +289,53 @@ def wait_ready(host, port, proc, timeout=300, tick=None,
         sleep(0.5)
 
 
-def spawn(argv, popen=subprocess.Popen):
-    """Start llama-server in its own console window.
+def log_path_for(name, port, log_dir):
+    """The log file for one launched server: <log_dir>/<name>-<port>.log.
 
-    Returns the process handle, or None if it could not be started - the exe
-    having been moved, renamed or deleted mid-session is the ordinary case, and
-    it used to escape as a raw OSError traceback. Returning None keeps that a
-    reportable outcome: wait_ready(proc=None) turns it into a plain failure
-    message, so even a caller that does not check gets a clean report instead
-    of a stack trace.
+    One file per config and port, overwritten at each launch, so logs do not
+    pile up. The config name is user text and can hold anything, so every
+    character outside [A-Za-z0-9._-] becomes an underscore - which also means
+    no name, however it is spelled, can address a file outside `log_dir`."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+    return os.path.join(log_dir, f"{safe}-{port}.log")
+
+
+def spawn(argv, log_path=None, popen=subprocess.Popen):
+    """Start llama-server. Returns the process handle, or None if it could not
+    be started.
+
+    Two ways to start, chosen by whether there is somewhere to send the output:
+
+      - no `log_path`: in its own console window. This is Windows, where a
+        second console is the natural place for a server's log.
+      - a `log_path`: detached from this terminal, stdin closed, stdout and
+        stderr written to that file. This is Linux and macOS, where there is
+        no second console to open, and a child sharing this terminal would
+        write over the board and die with it. start_new_session is what keeps
+        Ctrl-C at the board, and closing the terminal, from reaching it.
+
+    None rather than an exception, for a binary that cannot be run and for a
+    log that cannot be opened alike - the exe having been moved or renamed
+    mid-session is the ordinary case, and it used to escape as a raw OSError
+    traceback. wait_ready(proc=None) turns None into a plain failure message,
+    so even a caller that does not check gets a clean report.
 
     `popen` is injectable so the platform guard and argument handling can be
     tested without actually starting a process."""
-    flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+    if log_path is None:
+        flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+        try:
+            return popen(argv, creationflags=flags)
+        except OSError:
+            return None
     try:
-        return popen(argv, creationflags=flags)
+        folder = os.path.dirname(log_path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        # "wb" truncates: each launch starts its log afresh. Our handle is
+        # closed as soon as the child has its own copy.
+        with open(log_path, "wb") as log:
+            return popen(argv, stdin=subprocess.DEVNULL, stdout=log,
+                         stderr=subprocess.STDOUT, start_new_session=True)
     except OSError:
         return None

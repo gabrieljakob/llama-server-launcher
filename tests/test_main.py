@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import platformdirs
+
 from llama_launcher import __main__ as main
 from llama_launcher import catalog, config, server
 
@@ -389,10 +391,10 @@ class LaunchFixture(unittest.TestCase):
         return v
 
     def launch(self, values, owner=None, ask=None, wait=None, spawn=KEEP,
-               kill=True):
+               kill=True, log=None):
         """Returns (result, printed text, calls). Nothing real is started."""
         calls = {"owner_port": [], "wait_port": [], "killed": [], "asked": [],
-                 "spawned": [], "kill_args": []}
+                 "spawned": [], "kill_args": [], "log_path": [], "where": []}
 
         def fake_owner(port):
             calls["owner_port"].append(port)
@@ -411,10 +413,12 @@ class LaunchFixture(unittest.TestCase):
 
         def fake_wait(host, port, proc, **kw):
             calls["wait_port"].append(port)
+            calls["where"].append(kw.get("where"))
             return wait if wait is not None else (True, f"http://{host}:{port}")
 
-        def fake_spawn(argv):
+        def fake_spawn(argv, log_path=None):
             calls["spawned"].append(argv)
+            calls["log_path"].append(log_path)
             return FakeProc() if spawn is self.KEEP else spawn
 
         out = io.StringIO()
@@ -422,6 +426,7 @@ class LaunchFixture(unittest.TestCase):
              mock.patch.object(server, "kill", fake_kill), \
              mock.patch.object(server, "spawn", fake_spawn), \
              mock.patch.object(server, "wait_ready", fake_wait), \
+             mock.patch.object(main, "launch_log_path", lambda name, port: log), \
              mock.patch.object(main, "ask", fake_ask), \
              contextlib.redirect_stdout(out):
             result = main.launch(self.data, self.cfg, values)
@@ -860,6 +865,55 @@ class TestDraftModelIsCheckedOnlyWhenItIsEmitted(LaunchFixture):
         self.assertIs(result, True)
         self.assertIn("--spec-draft-model", calls["spawned"][0])
         self.assertIn(draft, calls["spawned"][0])
+
+
+class TestLaunchLogPath(unittest.TestCase):
+    def test_windows_gets_a_console_window_and_no_log(self):
+        self.assertIsNone(main.launch_log_path("c", 8080, platform="win32"))
+
+    def test_linux_and_macos_get_a_log_in_the_per_user_log_folder(self):
+        for platform in ("linux", "darwin"):
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    main.launch_log_path("c", 8080, platform=platform),
+                    os.path.join(main.LOG_DIR, "c-8080.log"))
+
+    def test_the_log_folder_is_the_per_user_one(self):
+        self.assertEqual(
+            main.LOG_DIR,
+            platformdirs.user_log_dir("llama-launcher", appauthor=False))
+
+
+class TestLaunchWithALog(LaunchFixture):
+    LOG = os.path.join("logs", "c-8080.log")
+
+    def test_the_log_path_is_handed_to_spawn_and_shown(self):
+        result, text, calls = self.launch(self.values(), log=self.LOG)
+        self.assertIs(result, True)
+        self.assertEqual(calls["log_path"], [self.LOG])
+        self.assertIn(f"log: {self.LOG}", text,
+                      "the user must be told where the output went")
+
+    def test_without_a_log_none_is_mentioned(self):
+        _, text, calls = self.launch(self.values())
+        self.assertEqual(calls["log_path"], [None])
+        self.assertNotIn("log:", text)
+
+    def test_a_failed_start_names_the_log_it_could_not_open(self):
+        result, text, calls = self.launch(self.values(), spawn=None,
+                                          log=self.LOG)
+        self.assertIs(result, False)
+        self.assertIn("could not be started", text)
+        self.assertIn(f"could not be opened for writing: {self.LOG}", text)
+        self.assertEqual(calls["wait_port"], [])
+
+    def test_wait_ready_is_told_to_point_at_the_log(self):
+        _, _, calls = self.launch(self.values(), log=self.LOG)
+        self.assertEqual(calls["where"], [f"see {self.LOG}"])
+
+    def test_wait_ready_is_told_to_point_at_the_console_window_without_one(self):
+        _, _, calls = self.launch(self.values())
+        self.assertEqual(calls["where"], ["check its console window"])
 
 
 if __name__ == "__main__":

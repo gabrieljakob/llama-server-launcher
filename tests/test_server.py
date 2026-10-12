@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import collections
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import psutil
@@ -635,6 +637,29 @@ class TestWaitReady(unittest.TestCase):
         self.assertIs(ok, False)
         self.assertIn("timed out", msg)
 
+    def test_a_dead_child_points_at_its_console_window_by_default(self):
+        ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(dies_after=1),
+                                    probe=lambda h, p: False,
+                                    sleep=lambda s: None)
+        self.assertIs(ok, False)
+        self.assertIn("check its console window", msg)
+
+    def test_a_dead_child_points_at_its_log_when_there_is_one(self):
+        ok, msg = server.wait_ready("127.0.0.1", 8080, FakeProc(dies_after=1),
+                                    probe=lambda h, p: False,
+                                    sleep=lambda s: None,
+                                    where="see /logs/c-8080.log")
+        self.assertIs(ok, False)
+        self.assertIn("see /logs/c-8080.log", msg)
+        self.assertNotIn("console window", msg)
+
+    def test_a_child_that_never_started_is_not_told_about_an_exe(self):
+        """The same message is read on Linux and macOS, where there is none."""
+        ok, msg = server.wait_ready("127.0.0.1", 8080, None,
+                                    sleep=lambda s: None)
+        self.assertIn("did not start", msg)
+        self.assertNotIn(".exe", msg)
+
 
 class TestPortOpen(unittest.TestCase):
     """Uses a loopback socket the test binds and closes itself: instant,
@@ -728,6 +753,108 @@ class TestSpawn(unittest.TestCase):
                                     probe=lambda h, p: True, sleep=lambda s: None)
         self.assertIs(ok, False)
         self.assertIn("did not start", msg)
+
+
+class TestSpawnToALogFile(unittest.TestCase):
+    """With a log path the server is detached and its output goes to a file -
+    how Linux and macOS start it, having no second console to open."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.log = os.path.join(self.folder, "logs", "c-8080.log")
+
+    def spawn(self):
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            seen["argv"] = argv
+            seen["kwargs"] = kwargs
+            seen["log"] = kwargs["stdout"]
+            return "proc"
+
+        result = server.spawn(["llama-server", "--port", "8080"],
+                              log_path=self.log, popen=fake_popen)
+        return result, seen
+
+    def test_output_goes_to_the_log_and_stdin_is_closed(self):
+        result, seen = self.spawn()
+        self.assertEqual(result, "proc")
+        self.assertEqual(seen["argv"], ["llama-server", "--port", "8080"])
+        self.assertEqual(seen["log"].name, self.log)
+        self.assertIs(seen["kwargs"]["stderr"], subprocess.STDOUT)
+        self.assertIs(seen["kwargs"]["stdin"], subprocess.DEVNULL)
+
+    def test_the_server_is_detached_from_the_launchers_terminal(self):
+        """Without a session of its own, Ctrl-C at the board and closing the
+        terminal both reach the server."""
+        _, seen = self.spawn()
+        self.assertIs(seen["kwargs"]["start_new_session"], True)
+
+    def test_no_console_window_is_requested(self):
+        _, seen = self.spawn()
+        self.assertNotIn("creationflags", seen["kwargs"])
+        self.assertNotIn("shell", seen["kwargs"])
+
+    def test_the_log_folder_is_created(self):
+        self.assertFalse(os.path.exists(os.path.dirname(self.log)))
+        self.spawn()
+        self.assertTrue(os.path.isfile(self.log))
+
+    def test_each_launch_starts_the_log_afresh(self):
+        os.makedirs(os.path.dirname(self.log))
+        with open(self.log, "w", encoding="utf-8") as f:
+            f.write("the previous run")
+        self.spawn()
+        self.assertEqual(os.path.getsize(self.log), 0)
+
+    def test_the_launchers_own_handle_is_closed_afterwards(self):
+        """The child has its own copy. Keeping ours open would hold the file
+        for as long as the launcher runs."""
+        _, seen = self.spawn()
+        self.assertTrue(seen["log"].closed)
+
+    def test_a_log_that_cannot_be_opened_is_none_and_nothing_is_started(self):
+        with open(os.path.join(self.folder, "logs"), "w", encoding="utf-8"):
+            pass                              # a FILE where the folder goes
+
+        def boom(argv, **kwargs):
+            raise AssertionError("nothing may be started without its log")
+
+        self.assertIsNone(server.spawn(["llama-server"], log_path=self.log,
+                                       popen=boom))
+
+    def test_returns_none_when_the_exe_has_moved(self):
+        def gone(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory")
+
+        self.assertIsNone(server.spawn(["/gone/llama-server"],
+                                       log_path=self.log, popen=gone))
+
+
+class TestLogPathFor(unittest.TestCase):
+    def test_named_after_the_config_and_the_port(self):
+        self.assertEqual(server.log_path_for("qwen3.8", 8080, "logs"),
+                         os.path.join("logs", "qwen3.8-8080.log"))
+
+    def test_unsafe_characters_become_underscores(self):
+        path = server.log_path_for("my config: v2", 8080, "logs")
+        self.assertEqual(os.path.basename(path), "my_config__v2-8080.log")
+
+    def test_a_name_cannot_climb_out_of_the_log_folder(self):
+        """A config name is user text. However it is spelled, the file it
+        names is directly inside the log folder."""
+        folder = os.path.join("some", "logs")
+        for name in ("../../etc/passwd", "..\\..\\boot.ini", "/abs", "C:\\x",
+                     "..", "a/b", "qwen:3.8"):
+            with self.subTest(name=name):
+                path = server.log_path_for(name, 8080, folder)
+                self.assertEqual(os.path.dirname(path), folder)
+                self.assertNotIn("/", os.path.basename(path))
+                self.assertNotIn("\\", os.path.basename(path))
+
+    def test_a_name_that_is_not_a_string_still_makes_a_file_name(self):
+        path = server.log_path_for(5, 8080, "logs")
+        self.assertEqual(os.path.basename(path), "5-8080.log")
 
 
 if __name__ == "__main__":

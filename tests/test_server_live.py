@@ -9,9 +9,11 @@ The child is a few lines of Python that bind a port and sleep. It prints its
 own pid, because on a Windows venv sys.executable is a redirector and the
 process that ends up listening is that redirector's child.
 """
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -133,6 +135,31 @@ class TestStoppingARealListener(LiveListener):
                and time.monotonic() < deadline):
             time.sleep(0.1)
         self.assertIsNone(server.port_owner(self.port))
+
+
+class TestSpawningForReal(unittest.TestCase):
+    """spawn() with popen left alone: a real child and a real file."""
+
+    def setUp(self):
+        self.log = os.path.join(tempfile.mkdtemp(), "logs", "c-1.log")
+
+    def test_the_childs_output_lands_in_the_log(self):
+        proc = server.spawn([sys.executable, "-c",
+                             "print('started', flush=True)"],
+                            log_path=self.log)
+        self.assertIsNotNone(proc)
+        proc.wait(timeout=30)
+        with open(self.log, encoding="utf-8") as f:
+            self.assertIn("started", f.read())
+
+    @unittest.skipIf(os.name == "nt", "sessions are a POSIX concept")
+    def test_the_child_runs_in_a_session_of_its_own(self):
+        """What actually keeps Ctrl-C at the board from reaching the server."""
+        proc = server.spawn([sys.executable, "-c", "import time; time.sleep(30)"],
+                            log_path=self.log)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.kill)
+        self.assertNotEqual(os.getsid(proc.pid), os.getsid(0))
 
 
 if __name__ == "__main__":

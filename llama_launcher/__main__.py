@@ -36,6 +36,9 @@ CONFIG_PATH = os.path.join(
 # anything in a clone, and adopt_existing_config() copies it across once.
 ADOPT_PATH = os.path.join(SCRIPTS, CONFIG_NAME)
 LEGACY_PATH = os.path.join(SCRIPTS, "model_profiles.json")
+# Where a launched server's output goes on Linux and macOS. Windows gives each
+# server a console window of its own instead.
+LOG_DIR = platformdirs.user_log_dir(APP, appauthor=False)
 
 SERVER_EXE = "llama-server.exe" if sys.platform == "win32" else "llama-server"
 
@@ -310,6 +313,19 @@ def is_llama_server(name, llama_server):
     return bool(expected) and os.path.normcase(name) == os.path.normcase(expected)
 
 
+def launch_log_path(cfg_name, port, platform=None):
+    """Where this launch's output goes, or None if the server gets a console
+    window of its own.
+
+    Windows has a second console to open and Linux and macOS do not, so there
+    the output goes to a file instead - one per config and port, overwritten
+    at each launch. `platform` is injectable so both answers are testable on
+    either kind of machine."""
+    if (platform or sys.platform) == "win32":
+        return None
+    return server.log_path_for(cfg_name, port, LOG_DIR)
+
+
 def launch(data, cfg, values):
     """Returns True only if a server is actually up. Every failure path returns
     False so run_board can keep the board - and the user's unsaved edits - up."""
@@ -389,8 +405,11 @@ def launch(data, cfg, values):
         else:
             return False
 
+    log_path = launch_log_path(cfg["name"], port)
     print(f"\n  starting {cfg['name']} ...")
-    proc = server.spawn(argv)
+    if log_path:
+        print(f"  log: {log_path}")
+    proc = server.spawn(argv, log_path=log_path)
     if proc is None:
         # spawn() reports a start it could not make by returning None instead of
         # raising - the exe having been moved, renamed or deleted mid-session is
@@ -399,10 +418,14 @@ def launch(data, cfg, values):
         # no readiness to wait for and the path that is wrong is worth naming.
         print(f"\n  FAILED: llama-server could not be started from "
               f"{data['llama_server']}\n  Check that path - the file may have "
-              f"been moved or renamed.\n")
+              f"been moved or renamed.")
+        if log_path:
+            print(f"  Or its log could not be opened for writing: {log_path}")
+        print()
         return False
-    ok, msg = server.wait_ready(host, port, proc, tick=lambda: print(".", end="",
-                                                                    flush=True))
+    where = f"see {log_path}" if log_path else "check its console window"
+    ok, msg = server.wait_ready(host, port, proc, where=where,
+                                tick=lambda: print(".", end="", flush=True))
     print()
     print(f"  -> {msg}  (pid {proc.pid})" if ok else f"  FAILED: {msg}")
     return ok
