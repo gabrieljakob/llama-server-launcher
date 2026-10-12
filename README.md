@@ -290,7 +290,8 @@ moment the process was started. A port snapshot can be minutes old by the time y
 operating systems recycle PIDs; a different process that inherited the PID has a different start
 time and is left alone. Servers on other ports are never touched, so `:8080` and `:8082` coexist.
 
-Stopping asks first: the server gets five seconds to shut down before it is forced.
+On Linux and macOS a stop is a request first: the server gets five seconds to shut down before it
+is forced. On Windows it is ended at once.
 
 On Windows the server starts in its own console window. On Linux and macOS it starts detached,
 with its output in a log file whose path is printed — under `~/.local/state/llama-launcher/log/`
