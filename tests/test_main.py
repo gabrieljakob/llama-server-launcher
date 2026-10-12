@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from launcher import __main__ as main
-from launcher import catalog, config, server
+from llama_launcher import __main__ as main
+from llama_launcher import catalog, config, server
 
 
 class FakeProc:

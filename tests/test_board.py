@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from launcher import board, catalog
+from llama_launcher import board, catalog
 
 
 class TestRenderGroup(unittest.TestCase):

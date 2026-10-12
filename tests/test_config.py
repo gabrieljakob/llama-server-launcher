@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from launcher import config
+from llama_launcher import config
 
 
 class TestPaths(unittest.TestCase):

@@ -13,7 +13,7 @@ destroys it.
 
 import unittest
 
-from launcher import board, catalog
+from llama_launcher import board, catalog
 
 
 def values(**over):

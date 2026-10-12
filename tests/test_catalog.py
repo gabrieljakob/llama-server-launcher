@@ -1,5 +1,5 @@
 import unittest
-from launcher import catalog
+from llama_launcher import catalog
 
 
 class TestCatalogShape(unittest.TestCase):

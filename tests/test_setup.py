@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-from launcher import __main__ as main
+from llama_launcher import __main__ as main
 
 
 class TestParseDevices(unittest.TestCase):

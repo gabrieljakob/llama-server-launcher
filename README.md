@@ -89,7 +89,7 @@ and a CPU-only build says so.
 ```bash
 git clone https://github.com/gabrieljakob/llama-server-launcher.git
 cd llama-server-launcher
-python -m launcher
+python -m llama_launcher
 ```
 
 Or double-click `launch_model.bat`.

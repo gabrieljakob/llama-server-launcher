@@ -4,6 +4,6 @@ set "SCRIPT_DIR=%~dp0"
 set "PYTHON=python"
 where python >nul 2>&1 || set "PYTHON=py"
 pushd "%SCRIPT_DIR%"
-"%PYTHON%" -m launcher
+"%PYTHON%" -m llama_launcher
 popd
 pause

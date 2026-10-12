@@ -4,7 +4,7 @@ import subprocess
 import sys
 import unittest
 
-from launcher import server
+from llama_launcher import server
 
 NETSTAT = """
 Aktive Verbindungen
