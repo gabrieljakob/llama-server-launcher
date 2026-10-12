@@ -376,11 +376,23 @@ def launch(data, cfg, values):
 
     owner = server.port_owner(port)
     if owner and owner.pid is None:
-        # port_owner's third answer: the lookup could not be made, so the
-        # port's state is unknown. Not evidence that it is busy, and not
-        # evidence that it is free - saying "held by unknown (pid None)" would
-        # be neither. Going on is the honest choice: llama-server refuses to
-        # start on a taken port, and wait_ready reports that as an exit code.
+        # port_owner's third answer: it could not say who holds the port. Two
+        # different situations hide behind that and they need opposite
+        # responses. Either something IS listening and the OS will not name it
+        # (another user's process), or the lookup itself failed and the port
+        # may well be free. A connect tells them apart.
+        #
+        # Starting on a port that is known to be taken is worse than refusing:
+        # llama-server dies on the bind, and wait_ready - finding the
+        # stranger's listener open - reports that as our server being ready.
+        if any(server.port_open(probe_host, port)
+               for probe_host in dict.fromkeys(("127.0.0.1", host))):
+            print(f"\n  port {port} is in use by a process this launcher cannot "
+                  f"identify. Change the port on row 3.\n")
+            return False
+        # Nothing answers, so a failed lookup is all we know. Going on is the
+        # honest choice: llama-server refuses to start on a taken port, and
+        # wait_ready reports that as an exit code.
         print(f"  could not check whether port {port} is free - starting anyway")
         owner = None
     if owner:

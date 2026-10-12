@@ -400,10 +400,12 @@ class LaunchFixture(unittest.TestCase):
         return v
 
     def launch(self, values, owner=None, ask=None, wait=None, spawn=KEEP,
-               kill=True, log=None):
-        """Returns (result, printed text, calls). Nothing real is started."""
+               kill=True, log=None, answers=()):
+        """Returns (result, printed text, calls). Nothing real is started.
+        `answers` lists the hosts on which a connect probe finds a listener."""
         calls = {"owner_port": [], "wait_port": [], "killed": [], "asked": [],
-                 "spawned": [], "kill_args": [], "log_path": [], "where": []}
+                 "spawned": [], "kill_args": [], "log_path": [], "where": [],
+                 "probed": []}
 
         def fake_owner(port):
             calls["owner_port"].append(port)
@@ -430,11 +432,16 @@ class LaunchFixture(unittest.TestCase):
             calls["log_path"].append(log_path)
             return FakeProc() if spawn is self.KEEP else spawn
 
+        def fake_port_open(host, port, timeout=0.5):
+            calls["probed"].append((host, port))
+            return host in answers
+
         out = io.StringIO()
         with mock.patch.object(server, "port_owner", fake_owner), \
              mock.patch.object(server, "kill", fake_kill), \
              mock.patch.object(server, "spawn", fake_spawn), \
              mock.patch.object(server, "wait_ready", fake_wait), \
+             mock.patch.object(server, "port_open", fake_port_open), \
              mock.patch.object(main, "launch_log_path", lambda name, port: log), \
              mock.patch.object(main, "ask", fake_ask), \
              contextlib.redirect_stdout(out):
@@ -649,9 +656,45 @@ class TestSpawnThatCouldNotStartAnything(LaunchFixture):
 
 
 class TestPortOwnerThatCouldNotBeDetermined(LaunchFixture):
-    """server.port_owner has a third answer - netstat could not be asked - and
-    it is not the same as "somebody holds this port". Reading it as an owner
-    told the user the port was held by a process called "unknown"."""
+    """server.port_owner has a third answer - it could not say who holds the
+    port - and it is not the same as "somebody holds this port". Reading it as
+    an owner told the user the port was held by a process called "unknown"."""
+
+    def test_an_unknown_owner_on_a_port_that_answers_stops_the_launch(self):
+        """'Could not say who' is not 'could not tell whether'. Something IS
+        listening - another user's process, say - so starting would only have
+        llama-server die on the bind while the stranger's open port is read
+        as our server being ready."""
+        result, text, calls = self.launch(self.values(),
+                                          owner=server.UNKNOWN_OWNER,
+                                          answers=("127.0.0.1",))
+        self.assertIs(result, False)
+        self.assertIn("cannot identify", text)
+        self.assertIn("row 3", text)
+        self.assertNotIn("starting anyway", text)
+        self.assertEqual(calls["spawned"], [])
+        self.assertEqual(calls["killed"], [])
+        self.assertEqual(calls["asked"], [], "there is nobody to offer to stop")
+
+    def test_the_configured_host_is_probed_as_well_as_loopback(self):
+        """A listener bound only to the address the server is about to use is
+        just as much in the way."""
+        result, _, calls = self.launch(self.values(host="localhost"),
+                                       owner=server.UNKNOWN_OWNER,
+                                       answers=("localhost",))
+        self.assertIs(result, False)
+        self.assertEqual(calls["probed"],
+                         [("127.0.0.1", 8080), ("localhost", 8080)])
+        self.assertEqual(calls["spawned"], [])
+
+    def test_the_default_host_is_probed_only_once(self):
+        _, _, calls = self.launch(self.values(), owner=server.UNKNOWN_OWNER)
+        self.assertEqual(calls["probed"], [("127.0.0.1", 8080)])
+
+    def test_a_port_with_no_owner_is_not_probed(self):
+        """The probe is only for the answer that could not name anyone."""
+        _, _, calls = self.launch(self.values())
+        self.assertEqual(calls["probed"], [])
 
     def test_an_unknown_owner_is_not_reported_as_a_foreign_process(self):
         result, text, calls = self.launch(self.values(),
