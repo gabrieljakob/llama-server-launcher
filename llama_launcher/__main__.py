@@ -524,7 +524,7 @@ def run_board(data, cfg):
                 print(f"  {exc}")
                 continue
             dirty.clear()
-            print(f"  saved to {os.path.basename(CONFIG_PATH)}")
+            print(f"  saved to {CONFIG_PATH}")
             if kept:
                 print(f"  kept {len(kept)} setting(s) this launcher does not "
                       f"know: {', '.join(sorted(kept))}")

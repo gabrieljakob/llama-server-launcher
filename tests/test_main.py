@@ -149,6 +149,18 @@ class TestBoardKeepsRunningWhenSaveFails(unittest.TestCase):
         self.assertIn("saved to", text)
         self.assertNotIn("could not write", text)
 
+    def test_a_working_save_names_the_full_path(self):
+        """The config no longer sits beside the code, so the bare file name
+        tells nobody where to look."""
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "cfg.json")
+        data = {"version": 2, "model_root": folder, "llama_server": "x.exe",
+                "defaults": {}, "configs": []}
+        cfg = {"name": "c", "alias": "c", "model": "m.gguf", "settings": {}}
+        with mock.patch.object(main, "CONFIG_PATH", path):
+            text = self.board(data, cfg, ["s", "q"])
+        self.assertIn(f"saved to {path}", text)
+
     def test_a_save_that_fails_with_something_other_than_configerror_is_reported(self):
         """config.save promises one exception type for the write, but its own
         cleanup of the scratch file is unguarded - a scratch file that cannot be
