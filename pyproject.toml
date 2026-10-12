@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llama-launcher"
+version = "0.1.0"
+description = "An interactive board for llama.cpp's llama-server: pick a named configuration, adjust it, launch."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gabriel Jakob" }]
+keywords = ["llama.cpp", "llama-server", "gguf", "launcher"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "psutil>=6.0",
+    "platformdirs>=4",
+]
+
+[project.scripts]
+llama-launcher = "llama_launcher.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/gabrieljakob/llama-server-launcher"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llama_launcher"]

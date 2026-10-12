@@ -1,9 +1,9 @@
 @echo off
 setlocal
-set "SCRIPT_DIR=%~dp0"
-set "PYTHON=python"
-where python >nul 2>&1 || set "PYTHON=py"
-pushd "%SCRIPT_DIR%"
-"%PYTHON%" -m llama_launcher
-popd
+where uv >nul 2>&1 || (
+  echo uv is not installed. Run install.ps1, or see https://docs.astral.sh/uv/
+  pause
+  exit /b 1
+)
+uv run --project "%~dp0." llama-launcher %*
 pause

@@ -13,3 +13,6 @@ launcher_configs.json
 
 # Legacy pre-v2 profiles, kept on disk as a migration source and rollback.
 model_profiles.json
+
+# uv's project environment. Rebuilt from uv.lock by `uv sync`.
+.venv/
