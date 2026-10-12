@@ -89,9 +89,12 @@ main() {
     # --force so that running this again is how you update.
     uv tool install --force --python '>=3.12' "$src"
 
-    bin=$(uv tool dir --bin)
+    bin=$(uv tool dir --bin) || fail "could not find uv's tool folder"
+    # Captured first: inside the argument of the line below, a failure here
+    # would not stop the script, and it would report success.
+    installed=$("$bin/llama-launcher" --version) || fail "llama-launcher was installed but does not run; try: $bin/llama-launcher --version"
     say ""
-    say "installed: $("$bin/llama-launcher" --version)"
+    say "installed: $installed"
     if have llama-launcher; then
         say "run it with:  llama-launcher"
     else

@@ -16,8 +16,9 @@
 #
 # Everything runs inside one script block. A download that is cut off part-way
 # is a parse error that runs nothing, and no variable or preference set here
-# outlives the script. The one thing that does persist, for this window only,
-# is uv's folder on PATH - and only if uv had to be installed.
+# outlives the script. Two things do persist, for this window only: TLS 1.2 is
+# added to the protocols .NET may use, and uv's folder is added to PATH if uv
+# had to be installed.
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -102,8 +103,11 @@
     if ($LASTEXITCODE -ne 0) { throw "uv tool install failed (exit $LASTEXITCODE)" }
 
     $bin = (& uv tool dir --bin | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $bin) { throw "could not find uv's tool folder" }
+    $installed = & (Join-Path $bin 'llama-launcher.exe') --version
+    if ($LASTEXITCODE -ne 0) { throw "llama-launcher was installed but does not run (exit $LASTEXITCODE)" }
     Write-Host ''
-    Write-Host "installed: $(& (Join-Path $bin 'llama-launcher.exe') --version)"
+    Write-Host "installed: $installed"
     if (Get-Command llama-launcher -ErrorAction SilentlyContinue) {
         Write-Host 'run it with:  llama-launcher'
     } else {
