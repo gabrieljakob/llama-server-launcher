@@ -404,7 +404,7 @@ class TestKillGuard(unittest.TestCase):
         self.assertEqual(killed, [])
 
     def test_refuses_when_the_name_is_unknown(self):
-        """'unknown' means tasklist itself failed. Not knowing is not permission."""
+        """'unknown' means the name could not be read. Not knowing is not permission."""
         result, killed = self.kill("unknown")
         self.assertFalse(result)
         self.assertEqual(killed, [])
@@ -468,7 +468,7 @@ class TestKillPortGuard(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(killed, [], "must not have called the killer at all")
 
-    def test_refuses_when_netstat_could_not_say(self):
+    def test_refuses_when_the_lookup_could_not_say(self):
         """Not knowing is not permission, here as everywhere else."""
         result, killed = self.kill(server.UNKNOWN_OWNER)
         self.assertFalse(result)
@@ -481,7 +481,7 @@ class TestKillPortGuard(unittest.TestCase):
         self.assertEqual(killed, [])
 
     def test_the_port_check_is_opt_in_and_costs_nothing_when_unused(self):
-        """Callers that pass no expect_port must not pay for a netstat - and
+        """Callers that pass no expect_port must not pay for a port lookup - and
         must not have their kill blocked by one that fails."""
         def boom(port):
             raise AssertionError("owner_of must not be consulted")
