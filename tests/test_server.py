@@ -409,6 +409,13 @@ class TestKillGuard(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(killed, [])
 
+    def test_refuses_an_unreadable_name_even_if_that_is_the_expected_name(self):
+        """"unknown" is process_name saying it could not ask. A binary that
+        really is called "unknown" must not turn that into a match."""
+        result, killed = self.kill("unknown", expect="unknown")
+        self.assertFalse(result)
+        self.assertEqual(killed, [])
+
     def test_refuses_a_running_llama_server_when_that_is_not_what_was_expected(self):
         """The mismatch guard runs in BOTH directions. Here the live process is
         a llama-server but the caller expected something else - a comparison

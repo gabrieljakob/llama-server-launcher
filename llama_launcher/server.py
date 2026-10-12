@@ -218,7 +218,8 @@ def kill(pid, *, expect_name, expect_started, expect_port=None,
     refuse paths AND the proceed path are testable without stopping a real
     process."""
     current = name_of(pid)
-    if not current or current.lower() != expect_name.lower():
+    if (not current or current == UNKNOWN
+            or current.lower() != expect_name.lower()):
         return False
     if expect_started is None or started_of(pid) != expect_started:
         return False
