@@ -432,7 +432,7 @@ class TestPortOwnerIdentity(LaunchFixture):
         offered somebody else's process up for a force-kill. tasklist gives the
         image name and nothing else, so equality is the whole identity we have."""
         result, text, calls = self.launch(self.values(),
-                                          owner=(4321, "llama-server-proxy.exe"))
+                                          owner=server.Owner(4321, "llama-server-proxy.exe", 1000.5))
         self.assertIs(result, False)
         self.assertIn("not a llama-server", text)
         self.assertEqual(calls["asked"], [], "must not have offered to stop it")
@@ -442,7 +442,7 @@ class TestPortOwnerIdentity(LaunchFixture):
         """Otherwise 'never match' would pass the test above and the launcher
         could never take back its own port."""
         result, text, calls = self.launch(self.values(),
-                                          owner=(4321, "LLAMA-SERVER.EXE"),
+                                          owner=server.Owner(4321, "LLAMA-SERVER.EXE", 1000.5),
                                           ask="y")
         self.assertIs(result, True)
         self.assertEqual(calls["killed"], [4321])
@@ -565,7 +565,7 @@ class TestPortOwnerThatCouldNotBeDetermined(LaunchFixture):
         """Otherwise 'treat every owner as unknown' would pass the test above
         and the launcher would start on top of somebody else's port."""
         result, text, calls = self.launch(self.values(),
-                                          owner=(4321, "nginx.exe"))
+                                          owner=server.Owner(4321, "nginx.exe", 1000.5))
         self.assertIs(result, False)
         self.assertIn("not a llama-server", text)
         self.assertEqual(calls["spawned"], [])

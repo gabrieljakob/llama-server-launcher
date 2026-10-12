@@ -346,7 +346,7 @@ def launch(data, cfg, values):
         print(f"  could not check whether port {port} is free - starting anyway")
         owner = None
     if owner:
-        pid, name = owner
+        pid, name = owner.pid, owner.name
         # Exact image name, not a substring: "llama-server-proxy.exe" contains
         # "llama-server" and would have been offered up for a force-kill as
         # though it were ours. tasklist reports the image name alone, so an

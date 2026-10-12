@@ -1,8 +1,11 @@
 """Process and port handling. The only module that touches running processes."""
+import collections
 import socket
 import subprocess
 import sys
 import time
+
+import psutil
 
 
 # Every console tool used here (tasklist, netstat, taskkill) prints in the
@@ -26,11 +29,16 @@ OEM = "oem" if sys.platform == "win32" else "utf-8"
 
 UNKNOWN = "unknown"
 
-# port_owner's third answer: netstat could not be run, or did not come back
-# usable, so we do NOT know who holds the port. Deliberately distinct from
-# None ("asked, and the port is genuinely free") - a failed query is not
-# evidence of a free port, and the caller must be able to tell them apart.
-UNKNOWN_OWNER = (None, UNKNOWN)
+# Who holds a port: the pid, the process name, and the moment that process was
+# created. The creation time is what tells THIS process apart from a later one
+# that was handed the same pid.
+Owner = collections.namedtuple("Owner", "pid name started")
+
+# port_owner's third answer: the port's state could not be determined, so we do
+# NOT know who holds it. Deliberately distinct from None ("asked, and the port
+# is genuinely free") - a failed query is not evidence of a free port, and the
+# caller must be able to tell them apart.
+UNKNOWN_OWNER = Owner(None, UNKNOWN, None)
 
 
 def _console(argv, timeout, run=subprocess.run):
@@ -49,84 +57,125 @@ def _console(argv, timeout, run=subprocess.run):
         return None
 
 
-def parse_netstat(text, port):
-    """PID listening on `port`, or None. Matches row shape rather than the
-    status word, because that word is localised (ABHOEREN on a German
-    Windows, LISTENING on an English one)."""
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) < 5 or parts[0].upper() != "TCP":
-            continue
-        local, remote, pid = parts[1], parts[2], parts[-1]
-        if local.rsplit(":", 1)[-1] != str(port):
-            continue
-        if not remote.endswith(":0"):        # a listener has no peer
-            continue
-        if pid.isdigit():
-            return int(pid)
+def process_name(pid, ps=psutil):
+    """Name of the process `pid`.
+
+    Three distinct answers: the name; "" if no such process (it exited, so
+    there is nothing to stop); "unknown" if the OS would not say (we do not
+    know, and must not assume). Never raises.
+
+    `ps` is the psutil module, injectable so each answer can be reached in
+    tests without a real process in that state."""
+    try:
+        return ps.Process(pid).name()
+    except ps.NoSuchProcess:
+        return ""                # includes a zombie: exited, not yet reaped
+    except (ps.Error, OSError):
+        return UNKNOWN
+
+
+def process_started(pid, ps=psutil):
+    """When the process `pid` was created, as psutil reports it, or None if
+    that cannot be read. kill() compares two of these for equality, so the
+    value is passed around untouched - never rounded, never reformatted."""
+    try:
+        return ps.Process(pid).create_time()
+    except (ps.Error, OSError):
+        return None
+
+
+def _listens_on(conn, port, ps):
+    """Whether a psutil connection row is a TCP listener on `port`.
+
+    Decided by the row's state, not by a status word in some tool's localised
+    output. getattr, because an unbound socket reports its local address as an
+    empty tuple."""
+    return (conn.status == ps.CONN_LISTEN
+            and getattr(conn.laddr, "port", None) == port)
+
+
+def _table_listener(port, ps):
+    """(held, pid) for `port`, from the system-wide TCP table.
+
+    `held` is True if any row listens on the port. `pid` is the first such row
+    that names a process, or None if none does - Linux lists another user's
+    listening socket without its pid. A later row that names one wins over an
+    earlier row that does not: one port is often listed twice, once per
+    address family.
+
+    Raises ps.AccessDenied where the OS refuses the table outright, which is
+    what macOS does for anyone but root."""
+    held = False
+    for conn in ps.net_connections(kind="tcp"):
+        if _listens_on(conn, port, ps):
+            if conn.pid is not None:
+                return True, conn.pid
+            held = True
+    return held, None
+
+
+def _walk_listener(port, ps):
+    """pid of a process listening on `port`, found by asking each process for
+    its own sockets, or None.
+
+    The fallback for when the system-wide table is refused. It sees only the
+    processes this user may inspect, so None here is NOT 'free' - port_owner
+    cross-checks it."""
+    for proc in ps.process_iter():
+        try:
+            conns = proc.net_connections(kind="tcp")
+        except (ps.Error, OSError):
+            continue             # denied, or it exited while we were walking
+        if any(_listens_on(conn, port, ps) for conn in conns):
+            return proc.pid
     return None
 
 
-def parse_tasklist(text):
-    """Image name from `tasklist /FO CSV /NH` output.
-
-    Three answers, matching process_name's contract:
-      - the image name
-      - ""        no such process (no CSV row)
-      - "unknown" `text` is None, i.e. we never got output to read
-
-    Detection is by the absence of a CSV row, not by wording or exit code:
-    tasklist exits 0 for a no-match and prints a localised INFORMATION line.
-
-    None is tolerated rather than trusted-away: it means the output could not
-    be read, which is NOT the same as "the process is gone". Returning ""
-    there would tell kill()'s guard a live process had exited."""
-    if text is None:
-        return UNKNOWN
-    first = text.strip().splitlines()[0] if text.strip() else ""
-    if first.startswith('"'):
-        return first.split('","')[0].strip('"')
-    return ""
-
-
-def process_name(pid, run=subprocess.run):
-    """Image name for `pid`.
-
-    Three distinct answers: the name; "" if no such process (it exited, so there
-    is nothing to kill); "unknown" if tasklist itself could not be run, exited
-    non-zero, or produced no readable output (we do not know, and must not
-    assume). Never raises."""
-    r = _console(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                 10, run)
-    if r is None or r.returncode != 0:
-        return UNKNOWN
-    return parse_tasklist(r.stdout)
-
-
-def port_owner(port, run=subprocess.run):
+def port_owner(port, ps=psutil, probe=None):
     """Who holds `port`. Three answers, and the third one matters:
 
-      - (pid, name)     that process is listening
-      - None            netstat answered and nothing is listening: it is free
-      - UNKNOWN_OWNER   netstat could not be asked; we do NOT know
+      - Owner(pid, name, started)   that process is listening
+      - None                        asked, and nothing is listening: it is free
+      - UNKNOWN_OWNER               could not determine; we do NOT know
 
-    A failed netstat used to be reported as "free", which is the one reading the
+    A failed lookup used to be reported as "free", which is the one reading the
     evidence does not support. The caller decides what to do about not knowing;
     this function will not decide it by guessing.
 
-    `(pid, "unknown")` is a fourth shading of the same idea: the port IS held,
-    but tasklist could not say by what. kill() refuses on that name, so it
-    cannot become permission to kill."""
-    r = _console(["netstat", "-ano"], 20, run)
-    if r is None or r.returncode != 0 or r.stdout is None:
+    `Owner(pid, "unknown", None)` is a fourth shading of the same idea: the
+    port IS held and we know by which pid, but the OS would not name it.
+    kill() refuses on that name, so it cannot become permission to stop it.
+
+    Which lookup runs is decided by what psutil raises, not by sys.platform.
+    The system-wide table is authoritative where it can be read. Where it is
+    refused, each process is asked instead - and because that walk cannot see
+    another user's listener, "found nothing" is confirmed with a local connect
+    before it is allowed to mean "free". A listener bound only to some other
+    interface escapes that probe; llama-server's own bind failure, which
+    wait_ready reports as an exit code, is the backstop there.
+
+    `probe` is injectable (default: port_open) so the cross-check is testable
+    without a socket."""
+    if probe is None:
+        probe = port_open
+    try:
+        try:
+            held, pid = _table_listener(port, ps)
+        except ps.AccessDenied:
+            pid = _walk_listener(port, ps)
+            if pid is None:
+                return UNKNOWN_OWNER if probe("127.0.0.1", port) else None
+            held = True
+    except (ps.Error, OSError):
         return UNKNOWN_OWNER
-    pid = parse_netstat(r.stdout, port)
-    if pid is None:
+    if not held:
         return None
-    name = process_name(pid, run=run)
+    if pid is None:
+        return UNKNOWN_OWNER     # held, by a process the OS will not name
+    name = process_name(pid, ps=ps)
     if name == "":
-        return None            # the listener exited between netstat and tasklist
-    return pid, name
+        return None              # the listener exited between the two reads
+    return Owner(pid, name, process_started(pid, ps=ps))
 
 
 def _force_kill(pid, run=subprocess.run):

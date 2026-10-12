@@ -1,92 +1,281 @@
 # -*- coding: utf-8 -*-
+import collections
 import socket
 import subprocess
 import sys
 import unittest
 
+import psutil
+
 from llama_launcher import server
 
-NETSTAT = """
-Aktive Verbindungen
-
-  Proto  Lokale Adresse         Remoteadresse          Status           PID
-  TCP    0.0.0.0:135            0.0.0.0:0              ABHÖREN          1832
-  TCP    127.0.0.1:8080         0.0.0.0:0              ABHÖREN          19004
-  TCP    127.0.0.1:8082         127.0.0.1:51234        HERGESTELLT      31337
-  TCP    127.0.0.1:8082         0.0.0.0:0              ABHÖREN          24188
-  TCP    127.0.0.1:8090         127.0.0.1:51999        WARTEND          0
-  TCP    [::]:445               [::]:0                 ABHÖREN          4
-"""
-
-# Real `tasklist /FI "PID eq N" /FO CSV /NH` output from this machine. Note the
-# no-match case is German AND exits 0, so neither the wording nor the return code
-# can be used to detect it - only the absence of a CSV row can.
-TASKLIST_FOUND = '"System","4","Services","0","14.348 K"\n'
-TASKLIST_MISSING = ("INFORMATION: Es werden keine Aufgaben mit den angegebenen "
-                    "Kriterien ausgeführt.\n")
+Addr = collections.namedtuple("Addr", "ip port")
+# Rows from psutil.net_connections() carry a pid; a process's own rows do not.
+Conn = collections.namedtuple("Conn", "laddr status pid")
+OwnConn = collections.namedtuple("OwnConn", "laddr status")
 
 
-class TestParseNetstat(unittest.TestCase):
-    def test_finds_the_listening_pid(self):
-        self.assertEqual(server.parse_netstat(NETSTAT, 8080), 19004)
-        self.assertEqual(server.parse_netstat(NETSTAT, 8082), 24188)
-
-    def test_returns_none_for_a_free_port(self):
-        self.assertIsNone(server.parse_netstat(NETSTAT, 9999))
-
-    def test_ignores_established_rows(self):
-        """8082 has both an ESTABLISHED and a LISTENING row; only the listener
-        identifies the owner.
-
-        The fixture deliberately puts the ESTABLISHED row FIRST and gives it a
-        different PID. Both details are load-bearing: with the same PID, or with
-        the listener first, this test would pass even with the shape check
-        deleted, and would prove nothing."""
-        self.assertEqual(server.parse_netstat(NETSTAT, 8082), 24188)
-
-    def test_does_not_match_a_port_that_is_a_prefix(self):
-        """Port 808 must not match the 8080 row."""
-        self.assertIsNone(server.parse_netstat(NETSTAT, 808))
-
-    def test_handles_ipv6_rows(self):
-        self.assertEqual(server.parse_netstat(NETSTAT, 445), 4)
-
-    def test_ignores_time_wait_rows(self):
-        """A WARTEND row has a real peer address and pid 0; it owns nothing."""
-        self.assertIsNone(server.parse_netstat(NETSTAT, 8090))
-
-    def test_does_not_depend_on_the_localised_status_word(self):
-        """The same rows with English status words must parse identically."""
-        english = (NETSTAT.replace("ABHÖREN", "LISTENING")
-                          .replace("HERGESTELLT", "ESTABLISHED")
-                          .replace("WARTEND", "TIME_WAIT"))
-        self.assertEqual(server.parse_netstat(english, 8082), 24188)
-        self.assertIsNone(server.parse_netstat(english, 9999))
-
-    def test_empty_output_is_safe(self):
-        self.assertIsNone(server.parse_netstat("", 8080))
+def listening(port, pid, ip="127.0.0.1"):
+    return Conn(Addr(ip, port), psutil.CONN_LISTEN, pid)
 
 
-class TestParseTasklist(unittest.TestCase):
-    def test_extracts_the_image_name(self):
-        self.assertEqual(server.parse_tasklist(TASKLIST_FOUND), "System")
+class FakeProcess:
+    """Stands in for psutil.Process. Each read takes the exception it should
+    raise, so every one of process_name's three answers can be reached."""
 
-    def test_no_such_process_is_empty_not_unknown(self):
-        """'The process is gone' and 'we could not ask' are different answers.
-        Conflating them would let a caller's safety gate misread one for the
-        other. tasklist exits 0 in this case, so only the absent CSV row
-        distinguishes it."""
-        self.assertEqual(server.parse_tasklist(TASKLIST_MISSING), "")
+    def __init__(self, pid, name="llama-server", started=1000.5, conns=(),
+                 name_error=None, started_error=None, conns_error=None):
+        self.pid = pid
+        self._name = name
+        self._started = started
+        self._conns = list(conns)
+        self._name_error = name_error
+        self._started_error = started_error
+        self._conns_error = conns_error
 
-    def test_empty_output_is_empty(self):
-        self.assertEqual(server.parse_tasklist(""), "")
+    def name(self):
+        if self._name_error is not None:
+            raise self._name_error
+        return self._name
 
-    def test_none_output_is_unknown_not_empty(self):
-        """None means the output could never be read - the decode died in
-        subprocess's reader thread, where our try/except cannot reach. That is
-        'we could not ask', not 'the process is gone'. Returning "" here would
-        tell kill()'s guard that a live process had exited."""
-        self.assertEqual(server.parse_tasklist(None), "unknown")
+    def create_time(self):
+        if self._started_error is not None:
+            raise self._started_error
+        return self._started
+
+    def net_connections(self, kind):
+        if self._conns_error is not None:
+            raise self._conns_error
+        return list(self._conns)
+
+
+class FakePs:
+    """Stands in for the psutil MODULE, which is what server's functions take.
+
+    The exception classes are psutil's own, so the `except ps.NoSuchProcess`
+    clauses under test catch exactly what the real library raises. `calls`
+    records every question asked of the machine: which pid, which table."""
+
+    CONN_LISTEN = psutil.CONN_LISTEN
+    Error = psutil.Error
+    NoSuchProcess = psutil.NoSuchProcess
+    AccessDenied = psutil.AccessDenied
+    TimeoutExpired = psutil.TimeoutExpired
+
+    def __init__(self, table=(), table_error=None, procs=()):
+        self.table = list(table)
+        self.table_error = table_error
+        self.procs = {p.pid: p for p in procs}
+        self.calls = []
+
+    def net_connections(self, kind):
+        self.calls.append(("net_connections", kind))
+        if self.table_error is not None:
+            raise self.table_error
+        return list(self.table)
+
+    def Process(self, pid):
+        self.calls.append(("Process", pid))
+        if pid not in self.procs:
+            raise psutil.NoSuchProcess(pid)
+        return self.procs[pid]
+
+    def process_iter(self):
+        self.calls.append(("process_iter",))
+        return list(self.procs.values())
+
+
+class TestProcessName(unittest.TestCase):
+    """process_name is the guard on the stop path. Its three answers are
+    different facts, and conflating any two of them is a safety bug."""
+
+    def name(self, ps):
+        return server.process_name(4321, ps=ps)
+
+    def test_asks_about_exactly_one_pid(self):
+        """The safety property. A lookup by NAME would answer about some other
+        llama-server entirely."""
+        ps = FakePs(procs=[FakeProcess(4321)])
+        self.name(ps)
+        self.assertEqual(ps.calls, [("Process", 4321)])
+
+    def test_returns_the_name(self):
+        ps = FakePs(procs=[FakeProcess(4321, name="llama-server")])
+        self.assertEqual(self.name(ps), "llama-server")
+
+    def test_a_process_that_is_gone_is_empty_string(self):
+        """Answer two of three: it exited, so there is nothing to stop.
+        FakePs raises NoSuchProcess for a pid it does not hold."""
+        self.assertEqual(self.name(FakePs()), "")
+
+    def test_a_zombie_is_gone_too(self):
+        """Exited but not yet reaped. It holds no port and cannot be stopped."""
+        zombie = FakeProcess(4321, name_error=psutil.ZombieProcess(4321))
+        self.assertEqual(self.name(FakePs(procs=[zombie])), "")
+
+    def test_access_denied_is_unknown_not_empty(self):
+        """Answer three. "" would tell kill()'s guard a live process had
+        exited; "unknown" says we could not ask, and not knowing is not
+        permission."""
+        denied = FakeProcess(4321, name_error=psutil.AccessDenied(4321))
+        self.assertEqual(self.name(FakePs(procs=[denied])), "unknown")
+
+    def test_an_os_error_is_unknown(self):
+        broken = FakeProcess(4321, name_error=OSError("boom"))
+        self.assertEqual(self.name(FakePs(procs=[broken])), "unknown")
+
+
+class TestProcessStarted(unittest.TestCase):
+    def test_returns_the_creation_time(self):
+        ps = FakePs(procs=[FakeProcess(4321, started=1700000000.25)])
+        self.assertEqual(server.process_started(4321, ps=ps), 1700000000.25)
+
+    def test_a_process_that_is_gone_has_none(self):
+        self.assertIsNone(server.process_started(4321, ps=FakePs()))
+
+    def test_access_denied_is_none(self):
+        denied = FakeProcess(4321, started_error=psutil.AccessDenied(4321))
+        self.assertIsNone(server.process_started(4321, ps=FakePs(procs=[denied])))
+
+
+def no_probe(host, port):
+    raise AssertionError("the connect probe must not be consulted")
+
+
+class TestPortOwner(unittest.TestCase):
+    """Who holds a port, from the system-wide TCP table. Three answers, and
+    the difference between "free" and "could not ask" is the point."""
+
+    def owner(self, port, ps):
+        return server.port_owner(port, ps=ps, probe=no_probe)
+
+    def test_asks_for_the_tcp_table(self):
+        ps = FakePs()
+        self.owner(8080, ps)
+        self.assertEqual(ps.calls[0], ("net_connections", "tcp"))
+
+    def test_reports_the_pid_the_name_and_the_start_time(self):
+        ps = FakePs(table=[listening(8080, 19004)],
+                    procs=[FakeProcess(19004, name="llama-server", started=1000.5)])
+        owner = self.owner(8080, ps)
+        self.assertEqual(owner, server.Owner(19004, "llama-server", 1000.5))
+        self.assertEqual((owner.pid, owner.name, owner.started),
+                         (19004, "llama-server", 1000.5))
+
+    def test_a_free_port_is_none(self):
+        ps = FakePs(table=[listening(8080, 19004)], procs=[FakeProcess(19004)])
+        self.assertIsNone(self.owner(9999, ps))
+
+    def test_ignores_rows_that_are_not_listeners(self):
+        """8082 has an ESTABLISHED row and a LISTEN row. The fixture puts the
+        ESTABLISHED row FIRST and gives it a different pid. Both details are
+        load-bearing: with the same pid, or with the listener first, this
+        would pass with the status check deleted."""
+        connected = Conn(Addr("127.0.0.1", 8082), psutil.CONN_ESTABLISHED, 31337)
+        ps = FakePs(table=[connected, listening(8082, 24188)],
+                    procs=[FakeProcess(31337), FakeProcess(24188)])
+        self.assertEqual(self.owner(8082, ps).pid, 24188)
+
+    def test_does_not_match_a_different_port(self):
+        ps = FakePs(table=[listening(8080, 19004)], procs=[FakeProcess(19004)])
+        self.assertIsNone(self.owner(808, ps))
+        self.assertIsNone(self.owner(80800, ps))
+
+    def test_a_row_without_an_address_is_skipped(self):
+        """An unbound socket reports its address as an empty tuple."""
+        ps = FakePs(table=[Conn((), psutil.CONN_LISTEN, 5)], procs=[FakeProcess(5)])
+        self.assertIsNone(self.owner(8080, ps))
+
+    def test_a_table_that_cannot_be_read_is_not_a_free_port(self):
+        """'Could not determine' is not evidence the port is unused. Returning
+        None here would send the launcher on to start a server on a port
+        something else may well be holding."""
+        owner = self.owner(8080, FakePs(table_error=psutil.Error()))
+        self.assertIsNotNone(owner)
+        self.assertEqual(owner, server.UNKNOWN_OWNER)
+        self.assertIsNone(owner.pid)
+        self.assertEqual(owner.name, "unknown")
+
+    def test_an_os_error_reading_the_table_is_not_a_free_port(self):
+        owner = self.owner(8080, FakePs(table_error=OSError("boom")))
+        self.assertEqual(owner, server.UNKNOWN_OWNER)
+
+    def test_a_listener_the_os_will_not_name_is_unknown(self):
+        """Linux lists another user's listening socket without its pid. The
+        port IS held; there is just nobody we are allowed to name."""
+        ps = FakePs(table=[listening(8080, None)])
+        self.assertEqual(self.owner(8080, ps), server.UNKNOWN_OWNER)
+
+    def test_a_row_that_names_a_process_beats_one_that_does_not(self):
+        """One port, two rows: an IPv6 row with no pid ahead of an IPv4 row
+        with one. Stopping at the first would report a port we CAN identify
+        as unidentifiable."""
+        ps = FakePs(table=[listening(8080, None, ip="::"), listening(8080, 19004)],
+                    procs=[FakeProcess(19004)])
+        self.assertEqual(self.owner(8080, ps).pid, 19004)
+
+    def test_a_listener_that_exited_meanwhile_reads_as_free(self):
+        """The table saw it, the process is gone: the port really is free."""
+        ps = FakePs(table=[listening(8080, 19004)])       # no such process
+        self.assertIsNone(self.owner(8080, ps))
+
+    def test_a_held_port_whose_owner_cannot_be_named_stays_unknown(self):
+        """The port IS held; we just cannot say by what. Reporting it free
+        would be a lie, and the name kill() refuses on keeps it unkillable."""
+        denied = psutil.AccessDenied(19004)
+        hidden = FakeProcess(19004, name_error=denied, started_error=denied)
+        ps = FakePs(table=[listening(8080, 19004)], procs=[hidden])
+        self.assertEqual(self.owner(8080, ps),
+                         server.Owner(19004, "unknown", None))
+
+    def test_the_probe_is_not_consulted_when_the_table_could_be_read(self):
+        """The table is authoritative where the OS lets us read it. no_probe
+        raises, so merely reaching these two answers is the assertion."""
+        ps = FakePs(table=[listening(8080, 19004)], procs=[FakeProcess(19004)])
+        self.assertIsNotNone(self.owner(8080, ps))
+        self.assertIsNone(self.owner(9999, ps))
+
+
+class TestPortOwnerWithoutTheSystemTable(unittest.TestCase):
+    """macOS refuses the system-wide table to anyone but root, so the owner is
+    found by asking each process for its own sockets. That walk cannot see
+    another user's listener, which is why 'found nothing' is cross-checked
+    with a connect before it is allowed to mean 'free'."""
+
+    def ps(self, *procs):
+        return FakePs(table_error=psutil.AccessDenied(), procs=procs)
+
+    def own(self, port):
+        return OwnConn(Addr("127.0.0.1", port), psutil.CONN_LISTEN)
+
+    def test_falls_back_to_asking_each_process(self):
+        ps = self.ps(FakeProcess(1), FakeProcess(19004, conns=[self.own(8080)]))
+        owner = server.port_owner(8080, ps=ps, probe=no_probe)
+        self.assertEqual(owner, server.Owner(19004, "llama-server", 1000.5))
+        self.assertIn(("process_iter",), ps.calls)
+
+    def test_skips_processes_that_deny_access_or_vanish(self):
+        ps = self.ps(FakeProcess(1, conns_error=psutil.AccessDenied(1)),
+                     FakeProcess(2, conns_error=psutil.NoSuchProcess(2)),
+                     FakeProcess(19004, conns=[self.own(8080)]))
+        self.assertEqual(server.port_owner(8080, ps=ps, probe=no_probe).pid, 19004)
+
+    def test_finding_nothing_with_nothing_answering_is_free(self):
+        ps = self.ps(FakeProcess(1, conns=[self.own(9000)]))
+        self.assertIsNone(server.port_owner(8080, ps=ps, probe=lambda h, p: False))
+
+    def test_finding_nothing_while_something_answers_is_unknown(self):
+        """Somebody else's process holds it. Not ours to name, not ours to
+        stop - and above all not free."""
+        owner = server.port_owner(8080, ps=self.ps(FakeProcess(1)),
+                                  probe=lambda h, p: True)
+        self.assertEqual(owner, server.UNKNOWN_OWNER)
+
+    def test_the_probe_is_a_local_connect_to_that_port(self):
+        asked = []
+        server.port_owner(8080, ps=self.ps(),
+                          probe=lambda h, p: asked.append((h, p)) or False)
+        self.assertEqual(asked, [("127.0.0.1", 8080)])
 
 
 class Completed:
@@ -99,19 +288,13 @@ class Completed:
 
 
 class FakeRun:
-    """Stands in for subprocess.run: records the exact argv and kwargs of every
-    console call and answers by tool name.
-
-    These three functions shell out to tasklist, netstat and taskkill, so this
-    is the only way to assert what they actually ask the machine to do without
-    running it. `taskkill /IM llama-server.exe` would kill every llama-server on
-    the box - the regression this launcher exists to prevent - and it is exactly
-    as testable as it is dangerous, but only against a recorded argv."""
+    """Stands in for subprocess.run: records the exact argv and kwargs of the
+    taskkill call. Removed with taskkill itself in the next task."""
 
     def __init__(self, raises=None, **answers):
         self.calls = []                  # (argv, kwargs) per call, in order
         self.raises = raises
-        self.answers = answers           # tasklist=..., netstat=..., taskkill=...
+        self.answers = answers
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
@@ -136,140 +319,24 @@ class FakeRun:
 
 
 class TestConsoleDecoding(unittest.TestCase):
-    """The bug that crashed process_name on EVERY dead pid.
+    """taskkill is the last console tool on this path, and the next task
+    replaces it. Until then its output is still OEM-encoded and it can still
+    hang, so both guarantees stay under test."""
 
-    German tasklist's no-match line carries U+00FC as byte 0x81 in the OEM
-    codepage. cp1252 - what text=True picks - has no 0x81, and the decode runs
-    in subprocess's READER THREAD: the exception prints to stderr, .stdout comes
-    back None, and the try/except around subprocess.run never sees a thing.
-
-    The real failure cannot be provoked from a unit test (it needs the real
-    localised tasklist), so the guarantee is asserted where it lives: the
-    encoding actually passed to subprocess.run."""
-
-    def test_every_console_tool_decodes_with_the_oem_codepage(self):
-        run = FakeRun(netstat=Completed(NETSTAT),
-                      tasklist=Completed(TASKLIST_FOUND))
-        server.port_owner(8080, run=run)
+    def test_taskkill_decodes_with_the_oem_codepage(self):
+        run = FakeRun(taskkill=Completed(""))
         server._force_kill(4321, run=run)
-        self.assertEqual(sorted(run.tools()), ["netstat", "taskkill", "tasklist"])
-        for tool in run.tools():
-            self.assertEqual(run.kwargs(tool)["encoding"], server.OEM, tool)
-            self.assertEqual(run.kwargs(tool)["errors"], "replace", tool)
+        self.assertEqual(run.kwargs("taskkill")["encoding"], server.OEM)
+        self.assertEqual(run.kwargs("taskkill")["errors"], "replace")
 
     @unittest.skipUnless(sys.platform == "win32", "OEM is a Windows codepage")
     def test_oem_is_the_console_codepage_not_the_ansi_one(self):
-        """cp1252 is the ANSI codepage; console tools print in the OEM one."""
         self.assertEqual(server.OEM, "oem")
 
-    def test_every_console_tool_has_a_timeout(self):
-        """A console tool that never returns would hang the launcher forever."""
-        run = FakeRun(netstat=Completed(NETSTAT),
-                      tasklist=Completed(TASKLIST_FOUND))
-        server.port_owner(8080, run=run)
+    def test_taskkill_has_a_timeout(self):
+        run = FakeRun(taskkill=Completed(""))
         server._force_kill(4321, run=run)
-        for tool in run.tools():
-            self.assertGreater(run.kwargs(tool)["timeout"], 0, tool)
-
-
-class TestProcessName(unittest.TestCase):
-    """process_name is the guard on the kill path and had no test caller at
-    all: its crash took out both port_owner's 'listener exited' branch and
-    kill()'s 'already gone' refusal."""
-
-    def name(self, run):
-        return server.process_name(4321, run=run)
-
-    def test_asks_tasklist_about_exactly_one_pid(self):
-        """The argv is the safety property. A filter on IMAGENAME instead of
-        PID would answer about some other llama-server entirely."""
-        run = FakeRun(tasklist=Completed(TASKLIST_FOUND))
-        self.name(run)
-        self.assertEqual(run.argv("tasklist"),
-                         ["tasklist", "/FI", "PID eq 4321", "/FO", "CSV", "/NH"])
-
-    def test_returns_the_image_name(self):
-        self.assertEqual(self.name(FakeRun(tasklist=Completed(TASKLIST_FOUND))),
-                         "System")
-
-    def test_a_process_that_is_gone_is_empty_string(self):
-        """Answer two of three. TASKLIST_MISSING is the real German no-match
-        line from this machine, and tasklist exits 0 while printing it."""
-        self.assertEqual(self.name(FakeRun(tasklist=Completed(TASKLIST_MISSING))),
-                         "")
-
-    def test_a_decode_failure_is_unknown_not_empty(self):
-        """Answer three. stdout is None exactly as the reader thread leaves it
-        when the decode dies. This used to raise AttributeError on every dead
-        pid; reporting "" instead would be worse still, because "" means
-        'already gone' and would let a caller believe a live process had
-        exited."""
-        run = FakeRun(tasklist=Completed(None))
-        self.assertEqual(self.name(run), "unknown")
-
-    def test_tasklist_that_cannot_be_run_is_unknown(self):
-        self.assertEqual(self.name(FakeRun(raises=OSError("no tasklist"))),
-                         "unknown")
-
-    def test_tasklist_that_times_out_is_unknown(self):
-        boom = subprocess.TimeoutExpired(cmd="tasklist", timeout=10)
-        self.assertEqual(self.name(FakeRun(raises=boom)), "unknown")
-
-    def test_tasklist_that_exits_nonzero_is_unknown(self):
-        """A non-zero exit with empty stdout is a failed query, not a missing
-        process - and "" would be read as 'already gone'."""
-        run = FakeRun(tasklist=Completed("", returncode=1))
-        self.assertEqual(self.name(run), "unknown")
-
-
-class TestPortOwner(unittest.TestCase):
-    """port_owner had no test caller either, including for the argv that
-    decides which process gets force-killed."""
-
-    def test_asks_netstat_for_all_connections_with_pids(self):
-        run = FakeRun(netstat=Completed(NETSTAT),
-                      tasklist=Completed(TASKLIST_FOUND))
-        server.port_owner(8080, run=run)
-        self.assertEqual(run.argv("netstat"), ["netstat", "-ano"])
-
-    def test_reports_the_pid_and_the_image_name(self):
-        run = FakeRun(netstat=Completed(NETSTAT),
-                      tasklist=Completed(TASKLIST_FOUND))
-        self.assertEqual(server.port_owner(8080, run=run), (19004, "System"))
-
-    def test_a_free_port_is_none(self):
-        run = FakeRun(netstat=Completed(NETSTAT))
-        self.assertIsNone(server.port_owner(9999, run=run))
-
-    def test_a_netstat_that_cannot_be_run_is_not_a_free_port(self):
-        """'Could not determine' is not evidence the port is unused. Returning
-        None here would send the launcher on to start a server on a port
-        something else may well be holding."""
-        owner = server.port_owner(8080, run=FakeRun(raises=OSError("no netstat")))
-        self.assertIsNotNone(owner)
-        self.assertEqual(owner, server.UNKNOWN_OWNER)
-        self.assertEqual(owner[1], "unknown")
-
-    def test_a_netstat_that_exits_nonzero_is_not_a_free_port(self):
-        run = FakeRun(netstat=Completed("", returncode=1))
-        self.assertEqual(server.port_owner(8080, run=run), server.UNKNOWN_OWNER)
-
-    def test_a_netstat_whose_output_could_not_be_decoded_is_not_a_free_port(self):
-        """netstat is localised too, so it has the same 0x81 exposure."""
-        run = FakeRun(netstat=Completed(None))
-        self.assertEqual(server.port_owner(8080, run=run), server.UNKNOWN_OWNER)
-
-    def test_a_listener_that_exited_meanwhile_reads_as_free(self):
-        """netstat saw it, tasklist says it is gone: the port really is free."""
-        run = FakeRun(netstat=Completed(NETSTAT),
-                      tasklist=Completed(TASKLIST_MISSING))
-        self.assertIsNone(server.port_owner(8080, run=run))
-
-    def test_a_held_port_whose_owner_cannot_be_named_stays_unknown(self):
-        """The port IS held; we just cannot say by what. Reporting it free
-        would be a lie, and the name kill() refuses on keeps it unkillable."""
-        run = FakeRun(netstat=Completed(NETSTAT), tasklist=Completed(None))
-        self.assertEqual(server.port_owner(8080, run=run), (19004, "unknown"))
+        self.assertGreater(run.kwargs("taskkill")["timeout"], 0)
 
 
 class TestForceKill(unittest.TestCase):
