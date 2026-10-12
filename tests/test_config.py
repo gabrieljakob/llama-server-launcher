@@ -6,9 +6,15 @@ import unittest
 from llama_launcher import config
 
 
+WINDOWS_PATHS = unittest.skipUnless(
+    os.name == "nt",
+    "drive letters, backslashes and case folding are Windows path rules")
+
+
 class TestPaths(unittest.TestCase):
     ROOT = r"D:\LLM Models"
 
+    @WINDOWS_PATHS
     def test_canon_folds_separators_and_case(self):
         self.assertEqual(config.canon("D:/LLM Models/a/b.gguf"),
                          config.canon(r"d:\llm models\A\B.gguf"))
@@ -17,10 +23,12 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(config.resolve_path("Qwen/x.gguf", self.ROOT),
                          os.path.join(self.ROOT, "Qwen", "x.gguf"))
 
+    @WINDOWS_PATHS
     def test_resolve_path_passes_absolute_through(self):
         p = r"C:\elsewhere\x.gguf"
         self.assertEqual(config.resolve_path(p, self.ROOT), p)
 
+    @WINDOWS_PATHS
     def test_relativise_strips_the_root(self):
         self.assertEqual(
             config.relativise(r"D:\LLM Models\Qwen\x.gguf", self.ROOT),
@@ -29,6 +37,29 @@ class TestPaths(unittest.TestCase):
     def test_relativise_keeps_paths_outside_the_root(self):
         p = r"C:\elsewhere\x.gguf"
         self.assertEqual(config.relativise(p, self.ROOT), p)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX path rules")
+class TestPathsPosix(unittest.TestCase):
+    """The same three properties as the guarded tests in TestPaths, with the
+    paths a Linux or macOS config actually holds."""
+
+    ROOT = "/srv/LLM Models"
+
+    def test_canon_folds_separators_but_not_case(self):
+        self.assertEqual(config.canon("/srv/LLM Models//a/./b.gguf"),
+                         config.canon("/srv/LLM Models/a/b.gguf"))
+        self.assertNotEqual(config.canon("/srv/LLM Models/A/b.gguf"),
+                            config.canon("/srv/LLM Models/a/b.gguf"))
+
+    def test_resolve_path_passes_absolute_through(self):
+        p = "/elsewhere/x.gguf"
+        self.assertEqual(config.resolve_path(p, self.ROOT), p)
+
+    def test_relativise_strips_the_root(self):
+        self.assertEqual(
+            config.relativise("/srv/LLM Models/Qwen/x.gguf", self.ROOT),
+            "Qwen/x.gguf")
 
 
 class TestResolveValues(unittest.TestCase):
